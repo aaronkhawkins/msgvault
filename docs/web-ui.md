@@ -75,6 +75,7 @@ dedicated web OAuth client with the exact callback URL, then keep its credential
 in environment variables rather than `config.toml`:
 
 ```toml
+# Keep [server].api_key configured; Google login requires the recovery key.
 [google_oidc]
 enabled = true
 redirect_url = "https://archive.example.com/auth/google/callback"

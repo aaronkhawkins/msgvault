@@ -70,7 +70,7 @@ func TestGoogleOIDCLoginCreatesExistingBrowserSessionAndPreservesPermalink(t *te
 	srv := newGoogleOIDCTestServer(t, provider)
 
 	login := performSessionRequest(t, srv, http.MethodGet,
-		googleOIDCLoginPath+"?return_to="+url.QueryEscape("/m/4242?from=personal-os"), nil, nil, true)
+		googleOIDCLoginPath+"?return_to="+url.QueryEscape("/m/4242?from=external-app"), nil, nil, true)
 	require.Equal(http.StatusFound, login.Code, login.Body.String())
 	assert.True(strings.HasPrefix(login.Header().Get("Location"), "https://accounts.example.test/authorize"))
 	assert.NotEmpty(provider.state)
@@ -90,7 +90,7 @@ func TestGoogleOIDCLoginCreatesExistingBrowserSessionAndPreservesPermalink(t *te
 		googleOIDCCallbackPath+"?state="+url.QueryEscape(provider.state)+"&code=good-code",
 		nil, callbackHeaders, true)
 	require.Equal(http.StatusOK, callback.Code, callback.Body.String())
-	assert.Contains(callback.Body.String(), "/m/4242?from=personal-os")
+	assert.Contains(callback.Body.String(), "/m/4242?from=external-app")
 	assert.Equal("no-store", callback.Header().Get("Cache-Control"))
 	assert.Equal("no-referrer", callback.Header().Get("Referrer-Policy"))
 
@@ -264,4 +264,38 @@ func requireNamedCookie(t *testing.T, resp *httptest.ResponseRecorder, name stri
 	cookie := findNamedCookie(resp, name)
 	require.NotNil(t, cookie, "%s cookie not found", name)
 	return cookie
+}
+
+func TestGoogleOIDCTransactionsExpireAndReclaimCapacity(t *testing.T) {
+	store := newGoogleOIDCTransactionStore(time.Minute)
+	now := time.Now()
+	store.now = func() time.Time { return now }
+	state, _, err := store.create("/m/42")
+	require.NoError(t, err)
+	now = now.Add(time.Minute)
+	_, ok := store.take(state)
+	assert.False(t, ok, "transactions expire at their deadline")
+	for index := range googleOIDCMaxPending {
+		store.transactions[strconv.Itoa(index)] = googleOIDCTransaction{ExpiresAt: now}
+	}
+	state, _, err = store.create("/m/43")
+	require.NoError(t, err)
+	assert.Len(t, store.transactions, 1)
+	_, ok = store.take(state)
+	assert.True(t, ok)
+}
+
+func TestGoogleOIDCDenialConsumesTransaction(t *testing.T) {
+	provider := &fakeGoogleOIDCProvider{}
+	srv := newGoogleOIDCTestServer(t, provider)
+	login := performSessionRequest(t, srv, http.MethodGet, googleOIDCLoginPath, nil, nil, true)
+	require.Equal(t, http.StatusFound, login.Code)
+	cookie := requireNamedCookie(t, login, googleOIDCCookieName)
+	headers := http.Header{"Cookie": []string{cookie.String()}}
+	path := googleOIDCCallbackPath + "?state=" + url.QueryEscape(provider.state) + "&error=access_denied"
+	denied := performSessionRequest(t, srv, http.MethodGet, path, nil, headers, true)
+	assert.Equal(t, http.StatusUnauthorized, denied.Code)
+	assert.Nil(t, findNamedCookie(denied, sessionCookieName))
+	replay := performSessionRequest(t, srv, http.MethodGet, path, nil, headers, true)
+	assert.Equal(t, http.StatusBadRequest, replay.Code)
 }

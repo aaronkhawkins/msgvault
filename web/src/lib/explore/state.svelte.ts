@@ -500,14 +500,15 @@ export class ExploreState {
     let parsed = parseExploreURLState(this.browser.location.search);
     const hasExplicitState = new URLSearchParams(this.browser.location.search).has(STATE_PARAMETER);
     const permalink = hasExplicitState ? null : this.browser.location.pathname.match(MESSAGE_PERMALINK_PATTERN);
-    if (permalink) {
-      const key = `message:${permalink[1]}`;
+    if (permalink && Number.isSafeInteger(Number(permalink[1]))) {
+      const key = `archive-message:${permalink[1]}`;
       parsed = {
         ...freshDefaults(),
         workspace: 'everything',
         selectedRow: key,
         activeRow: key,
-        scrollAnchor: { key, offset: 0 }
+        scrollAnchor: null,
+        conversationAnchor: permalink[1]
       };
     }
     parsed.searchMode = resolveInitialSearchMode(

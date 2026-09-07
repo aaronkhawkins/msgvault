@@ -203,34 +203,68 @@ describe('ExploreLoader', () => {
     state.destroy();
   });
 
-  it('resolves an archive message permalink to the canonical row key after paging', async () => {
+  it('loads an older chat permalink directly without paging the archive', async () => {
     window.history.replaceState(null, '', '/m/3');
-    let explorePostCount = 0;
     const fetchFn = vi.fn<typeof fetch>(async (input) => {
-      const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
-      if (path !== '/api/v1/explore') return Response.json(exploreResponse());
-      explorePostCount += 1;
-      const page = explorePostCount;
+      const path = new URL((input as Request).url).pathname;
+      if (path === '/api/v1/messages/3') return Response.json({
+        id: 3, conversation_id: 100, message_type: 'sms', subject: 'Older message',
+        snippet: 'Exact message', sent_at: '2020-01-01T00:00:00Z', attachments: [], has_attachments: false
+      });
       return Response.json(exploreResponse({
-        rows: [{
-          ...entry(page),
-          key: `source:1:message:source-${page}`,
-          anchor_message_id: page,
-          conversation_id: 100
-        }],
-        total_count: 10_000,
-        ...(page < 4 ? { next_cursor: `cursor-${page}` } : {})
+        rows: [{ ...entry(99), key: 'conversation:100', anchor_message_id: 99, conversation_id: 100 }],
+        total_count: 100_000, next_cursor: 'far-back-cursor'
       }));
     });
     const state = new ExploreState(window);
-    const { cleanup } = setup(fetchFn, state);
-
-    await vi.waitFor(() => expect(state.current.selectedRow).toBe('source:1:message:source-3'));
-    expect(state.current.activeRow).toBe('source:1:message:source-3');
-    expect(state.current.scrollAnchor).toEqual({ key: 'source:1:message:source-3', offset: 0 });
+    const { loader, cleanup } = setup(fetchFn, state);
+    await vi.waitFor(() => expect(loader.permalinkRow?.anchor_message_id).toBe(3));
+    expect(loader.permalinkRow?.conversation_id).toBe(100);
     expect(state.current.conversationAnchor).toBe('3');
-    expect(explorePostCount).toBe(3);
+    expect(loader.rows[0]?.anchor_message_id).toBe(99);
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    expect(loader.restoring).toBe(false);
+    cleanup();
+    state.destroy();
+  });
 
+  it('reports a missing permalink without draining archive pages', async () => {
+    window.history.replaceState(null, '', '/m/999999');
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      return new URL((input as Request).url).pathname === '/api/v1/messages/999999'
+        ? Response.json({ error: 'not_found' }, { status: 404 })
+        : Response.json(exploreResponse({ next_cursor: 'more' }));
+    });
+    const state = new ExploreState(window);
+    const { loader, cleanup } = setup(fetchFn, state);
+    await vi.waitFor(() => expect(loader.permalinkError).toContain('no longer available'));
+    expect(loader.permalinkRow).toBeUndefined();
+    expect(fetchFn).toHaveBeenCalledTimes(2);
+    cleanup();
+    state.destroy();
+  });
+
+  it('ignores a stale permalink response after navigation', async () => {
+    window.history.replaceState(null, '', '/m/3');
+    let finish!: (response: Response) => void;
+    let messageSignal: AbortSignal | undefined;
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      const request = input as Request;
+      if (new URL(request.url).pathname === '/api/v1/messages/3') {
+        messageSignal = request.signal;
+        return new Promise<Response>((resolve) => { finish = resolve; });
+      }
+      return Response.json(exploreResponse());
+    });
+    const state = new ExploreState(window);
+    const { loader, cleanup } = setup(fetchFn, state);
+    await vi.waitFor(() => expect(loader.permalinkLoading).toBe(true));
+    state.commitNavigation({ selectedRow: null });
+    flushSync();
+    expect(messageSignal?.aborted).toBe(true);
+    finish(Response.json({ id: 3, conversation_id: 100, attachments: [] }));
+    await vi.waitFor(() => expect(loader.permalinkLoading).toBe(false));
+    expect(loader.permalinkRow).toBeUndefined();
     cleanup();
     state.destroy();
   });

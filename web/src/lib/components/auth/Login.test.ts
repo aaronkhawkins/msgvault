@@ -19,7 +19,7 @@ function response(status: number) {
 
 describe('Login', () => {
   it('offers Google login while retaining the exact permalink return path', () => {
-    window.history.replaceState(null, '', '/m/4242?from=personal-os');
+    window.history.replaceState(null, '', '/m/4242?from=external-app');
     const session = createSessionController();
     session.status = {
       auth_mode: 'required',
@@ -33,7 +33,7 @@ describe('Login', () => {
     const form = screen.getByRole('form', { name: 'Google sign in' });
     expect(form.getAttribute('action')).toBe('/auth/google/login');
     expect(form.querySelector<HTMLInputElement>('input[name="return_to"]')?.value)
-      .toBe('/m/4242?from=personal-os');
+      .toBe('/m/4242?from=external-app');
     expect(screen.getByRole('button', { name: 'Continue with Google' })).toBeTruthy();
     expect(screen.getByLabelText('API key')).toBeTruthy();
   });

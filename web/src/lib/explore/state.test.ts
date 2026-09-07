@@ -22,14 +22,15 @@ describe('Explore URL state', () => {
     const state = new ExploreState(window);
 
     expect(state.current.workspace).toBe('everything');
-    expect(state.current.selectedRow).toBe('message:4242');
-    expect(state.current.activeRow).toBe('message:4242');
-    expect(state.current.scrollAnchor).toEqual({ key: 'message:4242', offset: 0 });
+    expect(state.current.selectedRow).toBe('archive-message:4242');
+    expect(state.current.activeRow).toBe('archive-message:4242');
+    expect(state.current.scrollAnchor).toBeNull();
+    expect(state.current.conversationAnchor).toBe('4242');
     expect(window.location.pathname).toBe('/m/4242');
     state.destroy();
   });
 
-  it.each(['/m/0', '/m/-1', '/m/not-a-number', '/m/42/more'])('ignores invalid message permalink %s', (path) => {
+  it.each(['/m/0', '/m/-1', '/m/not-a-number', '/m/42/more', '/m/9007199254740992'])('ignores invalid message permalink %s', (path) => {
     window.history.replaceState(null, '', path);
     const state = new ExploreState(window);
 

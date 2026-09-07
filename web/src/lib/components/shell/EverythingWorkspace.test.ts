@@ -2083,6 +2083,46 @@ describe('EverythingWorkspace', () => {
   });
 
 
+  it('opens the exact older chat message even when the analytical cache is unavailable', async () => {
+    window.history.replaceState(null, '', '/m/3');
+    const message = {
+      id: 3, conversation_id: 7, subject: 'Older chat message', message_type: 'sms',
+      from: 'alice@example.com', to: ['bob@example.com'], sent_at: '2020-01-01T00:00:00Z',
+      snippet: 'Exact archived text', labels: [], has_attachments: false, size_bytes: 10,
+      body: 'Exact archived text', attachments: []
+    };
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      const url = new URL((input as Request).url);
+      if (url.pathname === '/api/v1/messages/3') return Response.json(message);
+      if (url.pathname.startsWith('/api/v1/conversations/')) {
+        expect(url.searchParams.get('anchor')).toBe('3');
+        return Response.json({ id: 7, anchor_id: 3, messages: [message], has_before: false, has_after: false, total: 2 });
+      }
+      return Response.json({ error: 'cache_unavailable', message: 'Cache is rebuilding' }, { status: 503 });
+    });
+    const state = new ExploreState(window);
+    const rendered = render(AppShell, { client: createAPIClient(fetchFn), state });
+    const reading = await screen.findByRole('complementary', { name: 'Reading pane: Older chat message' });
+    expect(await within(reading).findByRole('button', { name: 'Collapse message 3 from alice@example.com' })).toBeDefined();
+    expect(await within(reading).findByText('Exact archived text')).toBeDefined();
+    expect(state.current.conversationAnchor).toBe('3');
+    rendered.unmount();
+    state.destroy();
+  });
+
+  it('renders a missing archive message in the reading pane', async () => {
+    window.history.replaceState(null, '', '/m/404');
+    const fetchFn = vi.fn<typeof fetch>(async (input) =>
+      new URL((input as Request).url).pathname === '/api/v1/messages/404'
+        ? Response.json({ error: 'not_found' }, { status: 404 })
+        : Response.json(exploreResponse({ next_cursor: 'more' })));
+    const state = new ExploreState(window);
+    const rendered = render(AppShell, { client: createAPIClient(fetchFn), state });
+    expect(await screen.findByText('The selected message is no longer available.')).toBeDefined();
+    rendered.unmount();
+    state.destroy();
+  });
+
   it('carries the in-thread anchor in the URL by replacement so Back/Forward restore the same message', async () => {
     window.history.replaceState(null, '', `/?explore=${encodeURIComponent(JSON.stringify({ workspace: 'everything' }))}`);
     const row = { ...entry(1), anchor_message_id: 1, conversation_id: 7 };

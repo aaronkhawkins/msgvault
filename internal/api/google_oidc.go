@@ -27,6 +27,7 @@ const (
 	googleOIDCCookieName   = "msgvault_google_oidc"
 	googleOIDCEmailScope   = "email"
 	googleOIDCMaxPending   = 1024
+	googleOIDCHTTPTimeout  = 30 * time.Second
 )
 
 type googleOIDCIdentity struct {
@@ -49,6 +50,17 @@ type discoveredGoogleOIDCProvider struct {
 }
 
 func newDiscoveredGoogleOIDCProvider(ctx context.Context, cfg config.GoogleOIDCConfig) (*discoveredGoogleOIDCProvider, error) {
+	// The provider's shared JWKS fetch runs independently of request deadlines.
+	// Bound its HTTP client while preserving custom transports and tighter limits.
+	client := http.DefaultClient
+	if configured, ok := ctx.Value(oauth2.HTTPClient).(*http.Client); ok && configured != nil {
+		client = configured
+	}
+	boundedClient := *client
+	if boundedClient.Timeout <= 0 || boundedClient.Timeout > googleOIDCHTTPTimeout {
+		boundedClient.Timeout = googleOIDCHTTPTimeout
+	}
+	ctx = oidc.ClientContext(ctx, &boundedClient)
 	provider, err := oidc.NewProvider(ctx, cfg.Issuer)
 	if err != nil {
 		return nil, fmt.Errorf("discover Google OIDC provider: %w", err)

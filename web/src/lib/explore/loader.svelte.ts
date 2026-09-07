@@ -40,7 +40,7 @@ export interface ExploreLoaderCallbacks {
 const REPEATED_CURSOR_NOTICE = 'Pagination stopped because the server repeated a cursor without progress.';
 const NO_PROGRESS_NOTICE = 'Pagination stopped because the next page made no row progress.';
 const REVISION_CHANGED_NOTICE = 'Results changed while loading another page. Reload this view.';
-const ARCHIVE_MESSAGE_SELECTION_PATTERN = /^message:([1-9]\d*)$/;
+const ARCHIVE_MESSAGE_SELECTION_PATTERN = /^archive-message:([1-9]\d*)$/;
 export const END_PAUSE_NOTICE =
   'End paused loading to keep the table responsive; press End again to continue or refine the filters.';
 
@@ -53,7 +53,7 @@ function samePageAuthority(
     next.candidateSnapshotId === first.candidateSnapshotId;
 }
 
-function archiveMessageSelectionID(key: string): number | undefined {
+export function archiveMessageSelectionID(key: string): number | undefined {
   const match = key.match(ARCHIVE_MESSAGE_SELECTION_PATTERN);
   if (!match) return undefined;
   const id = Number(match[1]);
@@ -73,6 +73,11 @@ function archiveMessageSelectionID(key: string): number | undefined {
  */
 export class ExploreLoader {
   rows = $state<EntryRow[]>([]);
+  permalinkRow = $state<EntryRow>();
+  permalinkLoading = $state(false);
+  permalinkError = $state('');
+  permalinkMissing = $state(false);
+  private permalinkController: AbortController | undefined;
   groupRows = $state<ExploreGroupRow[]>([]);
   fileFacts = $state<ExploreFileFact[]>([]);
   resultGeneration = $state(0);
@@ -123,6 +128,53 @@ export class ExploreLoader {
     });
 
     $effect(() => this.runLoad(requestFingerprint));
+    $effect(() => {
+      const selected = this.state.current.selectedRow;
+      const enabled = this.callbacks.isEnabled() && this.state.current.workspace === 'everything';
+      void this.#retryRevision;
+      this.permalinkController?.abort();
+      this.permalinkRow = undefined;
+      this.permalinkError = '';
+      this.permalinkMissing = false;
+      this.permalinkLoading = false;
+      const id = selected ? archiveMessageSelectionID(selected) : undefined;
+      if (!enabled || id === undefined) return;
+      const controller = new AbortController();
+      this.permalinkController = controller;
+      this.permalinkLoading = true;
+      void client.GET('/api/v1/messages/{id}', {
+        params: { path: { id } }, signal: controller.signal
+      }).then(({ data, response }) => {
+        if (controller.signal.aborted) return;
+        if (!data) {
+          this.permalinkMissing = response.status === 404;
+          this.permalinkError = response.status === 404
+            ? 'The selected message is no longer available.'
+            : 'Could not load the selected message.';
+          return;
+        }
+        // This reader-only row represents the exact archive message, independent
+        // of the analytical grid's latest-message conversation anchors.
+        this.permalinkRow = {
+          key: selected!, kind: data.message_type ?? 'message',
+          anchor_message_id: id, conversation_id: data.conversation_id,
+          message_type: data.message_type ?? '', conversation_type: '',
+          title: data.subject, preview: data.snippet, occurred_at: data.sent_at,
+          source_id: data.source_id ?? 0, source_identifier: '', source_type: '',
+          attachment_count: data.attachments?.length ?? 0,
+          attachment_size: data.attachments?.reduce((sum, item) => sum + item.size_bytes, 0) ?? 0,
+          has_attachments: data.has_attachments, deleted_from_source: Boolean(data.deleted_at),
+          message_count: 1, match: {}, matched_sender_identities: [], matched_recipient_identities: []
+        };
+      }).catch((cause: unknown) => {
+        if (!controller.signal.aborted) {
+          this.permalinkError = cause instanceof Error ? cause.message : 'Could not load the selected message.';
+        }
+      }).finally(() => {
+        if (!controller.signal.aborted) this.permalinkLoading = false;
+      });
+      return () => controller.abort();
+    });
   }
 
   private runLoad(requestFingerprint: string): void {
@@ -213,7 +265,6 @@ export class ExploreLoader {
           const entryResult = loaded.result as ExploreResult;
           this.result = entryResult;
           this.rows = entryResult.rows;
-          this.resolveArchiveMessageSelection();
           this.groupRows = [];
           this.fileFacts = [];
           this.resultFingerprint = fingerprint;
@@ -337,7 +388,6 @@ export class ExploreLoader {
         const merged = new Map(this.rows.map((row) => [row.key, row]));
         for (const row of entryResult.rows) merged.set(row.key, row);
         this.rows = [...merged.values()];
-        this.resolveArchiveMessageSelection();
         this.nextCursor = followingCursor;
         this.result = { ...entryResult, rows: this.rows, nextCursor: followingCursor };
       } else if (this.pageKind === 'groups') {
@@ -411,7 +461,7 @@ export class ExploreLoader {
       current.activeRow,
       current.scrollAnchor?.key,
       this.pageKind !== 'files' && selected && !parseGroupSelection(selected) ? selected : undefined
-    ].filter((key): key is string => Boolean(key)))];
+    ].filter((key): key is string => Boolean(key) && archiveMessageSelectionID(key!) === undefined))];
   }
 
   private hasRestorationKey(key: string): boolean {
@@ -419,27 +469,7 @@ export class ExploreLoader {
       return this.groupRows.some((row) => `group:${this.pageGrouping}:${row.key}` === key);
     }
     if (this.pageKind === 'files') return this.fileFacts.some((file) => file.key === key);
-    const archiveMessageID = archiveMessageSelectionID(key);
-    return this.rows.some((row) => row.key === key ||
-      (archiveMessageID !== undefined && row.anchor_message_id === archiveMessageID));
-  }
-
-  private resolveArchiveMessageSelection(): void {
-    const current = this.state.current;
-    const selected = current.selectedRow;
-    if (!selected) return;
-    const archiveMessageID = archiveMessageSelectionID(selected);
-    if (archiveMessageID === undefined) return;
-    const row = this.rows.find((candidate) => candidate.anchor_message_id === archiveMessageID);
-    if (!row || row.key === selected) return;
-    this.state.replaceTransient({
-      selectedRow: row.key,
-      activeRow: current.activeRow === selected ? row.key : current.activeRow,
-      scrollAnchor: current.scrollAnchor?.key === selected
-        ? { key: row.key, offset: current.scrollAnchor.offset }
-        : current.scrollAnchor,
-      conversationAnchor: String(archiveMessageID)
-    });
+    return this.rows.some((row) => row.key === key);
   }
 
   private async restoreDeepState(
@@ -495,6 +525,7 @@ export class ExploreLoader {
   };
 
   destroy = (): void => {
+    this.permalinkController?.abort();
     this.requestGeneration += 1;
     this.requestController?.abort();
   };

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -434,6 +435,8 @@ func TestLoadWithGoogleOIDCConfig(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.toml")
 	require.NoError(os.WriteFile(configPath, []byte(`
+[server]
+api_key = "oidc-recovery-api-key"
 [google_oidc]
 enabled = true
 client_id_env = "MSGVAULT_GOOGLE_CLIENT_ID"
@@ -483,6 +486,8 @@ func TestLoadAllowsLoopbackGoogleOIDCPreview(t *testing.T) {
 	tmpDir := t.TempDir()
 	configPath := filepath.Join(tmpDir, "config.toml")
 	require.NoError(t, os.WriteFile(configPath, []byte(`
+[server]
+api_key = "oidc-recovery-api-key"
 [google_oidc]
 enabled = true
 redirect_url = "http://localhost:28082/auth/google/callback"
@@ -492,6 +497,37 @@ allowed_email = "owner@example.com"
 	cfg, err := Load(configPath, "")
 	require.NoError(t, err)
 	assert.Equal(t, "http://localhost:28082/auth/google/callback", cfg.GoogleOIDC.RedirectURL)
+}
+
+func TestLoadRejectsKeylessGoogleOIDCEvenWithoutCredentials(t *testing.T) {
+	for _, credentials := range []bool{false, true} {
+		t.Run(fmt.Sprintf("credentials=%t", credentials), func(t *testing.T) {
+			clientID, clientSecret := "", ""
+			if credentials {
+				clientID, clientSecret = "client-id", "client-secret"
+			}
+			t.Setenv("MSGVAULT_GOOGLE_CLIENT_ID", clientID)
+			t.Setenv("MSGVAULT_GOOGLE_CLIENT_SECRET", clientSecret)
+			configPath := filepath.Join(t.TempDir(), "config.toml")
+			require.NoError(t, os.WriteFile(configPath, []byte(`
+[google_oidc]
+enabled = true
+redirect_url = "https://archive.example.com/auth/google/callback"
+allowed_email = "owner@example.com"
+`), 0o600))
+			_, err := Load(configPath, "")
+			require.ErrorContains(t, err, "requires [server] api_key")
+		})
+	}
+}
+
+func TestLoadAllowsKeylessModeWithGoogleOIDCDisabled(t *testing.T) {
+	configPath := filepath.Join(t.TempDir(), "config.toml")
+	require.NoError(t, os.WriteFile(configPath, []byte("[google_oidc]\nenabled = false\n"), 0o600))
+	cfg, err := Load(configPath, "")
+	require.NoError(t, err)
+	assert.Empty(t, cfg.Server.APIKey)
+	assert.False(t, cfg.GoogleOIDC.Enabled)
 }
 
 func TestLoadWithAnalyticsConfig(t *testing.T) {

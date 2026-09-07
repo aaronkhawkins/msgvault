@@ -19,7 +19,7 @@
   import { createExploreAPI } from '../../explore/api';
   import { filtersForGroup, parseGroupSelection } from '../../explore/group-context';
   import { findGroupDetail } from '../../explore/group-detail';
-  import type { ExploreLoader } from '../../explore/loader.svelte';
+  import { archiveMessageSelectionID, type ExploreLoader } from '../../explore/loader.svelte';
   import { groupingByDimension } from '../../grouping/catalog';
   import { canonicalFingerprint, createAllMatchingSelection, predicateFingerprint } from '../../explore/selection';
   import type { ExploreSelectionState, ExploreState } from '../../explore/state.svelte';
@@ -133,7 +133,8 @@
   const readingSelection = $derived.by((): ReadingPaneSelection | undefined => {
     const selected = readingTargetKey;
     if (!selected) return undefined;
-    const entry = loader.rows.find((row) => row.key === selected);
+    const entry = loader.permalinkRow?.key === selected
+      ? loader.permalinkRow : loader.rows.find((row) => row.key === selected);
     if (entry) return { kind: 'entry', row: entry };
     const group = parseGroupSelection(selected);
     return group && session.readingGroupDetail?.kind === 'group' &&
@@ -149,6 +150,12 @@
   } => {
     const selected = readingTargetKey;
     if (!selected || readingSelection) return { status: 'ready', message: '' };
+    if (archiveMessageSelectionID(selected) !== undefined) {
+      return {
+        status: loader.permalinkLoading ? 'loading' : loader.permalinkMissing ? 'missing' : 'error',
+        message: loader.permalinkError
+      };
+    }
     if (parseGroupSelection(selected)) {
       if (readingDetailUnavailable) {
         return {

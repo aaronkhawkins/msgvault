@@ -10,7 +10,7 @@ created: 2026-09-06
 
 ## Goal capsule
 
-Ship a narrow, single-user MsgVault fork for Aaron's personal Hawk08 archive. The
+Ship a narrow, single-user MsgVault fork for a personal archive. The
 browser signs in through a dedicated Google OIDC client, existing API-key clients
 continue unchanged, and an HTTPS permalink opens one exact archive message while
 the canonical `msgvault://<URL-encoded mailbox>/<archive id>` identity remains
@@ -27,7 +27,7 @@ separate. Production stays untouched until the isolated preview is reviewed.
 - Add a stable presentation path for an archive-local numeric message ID. Do not
   claim that database row IDs survive export/reimport or replace canonical source
   identity with an HTTPS URL.
-- Use a body-first pilot and existing attachment viewers. No new PersonalOS mail
+- Use a body-first pilot and existing attachment viewers. No new downstream mail
   viewer or attachment feature work.
 - Preserve the archive and take a straightforward backup before any live storage
   migration. No rollback rehearsal or enterprise cutover machinery.
@@ -36,8 +36,7 @@ separate. Production stays untouched until the isolated preview is reviewed.
 
 ### 1. Baseline and archive compatibility
 
-Confirm the target as Hawk08 `msgvault-personal`, leaving the separate work archive
-untouched. Exercise `v0.19.3` against an isolated copy or read-only-derived pilot
+Confirm the target personal archive, leaving any other archive instances untouched. Exercise `v0.19.3` against an isolated copy or read-only-derived pilot
 archive and verify that its embedded web UI and schema startup complete.
 
 ### 2. Fork and reproducible build
@@ -71,7 +70,7 @@ dependency for local fake-provider tests.
 Add `/m/<archive-id>` as the narrow stable browser presentation path. Normalize it
 into the existing Everything workspace selection and keep the path through login,
 callback completion, refresh, Back, and Forward. Validate positive integer IDs and
-show the existing not-found behavior for missing messages. Update PersonalOS link
+show the existing not-found behavior for missing messages. Update downstream link
 presentation only after the preview proves the route; retain the canonical
 `msgvault://` reference as the source identity.
 
@@ -87,14 +86,14 @@ isolated body-only archive to verify an exact message and one attachment on the
 Framework browser plus an iPhone-sized viewport. Submit permalink and OIDC as
 focused upstream contributions with operator documentation.
 
-### 7. Reviewed Hawk08 switch
+### 7. Reviewed production switch
 
 Show the working isolated preview and the concrete one-user production changes for
 review. After approval, take the ordinary archive backup if a storage migration is
 required, pause writes only as needed, deploy the tested image digest to
-`msgvault-personal`, configure the dedicated Google client, and verify login,
-source links, sync, attachment access, and PersonalOS integration. Do not modify
-the other Hawk08 MsgVault instance.
+the personal archive, configure the dedicated Google client, and verify login,
+source links, sync, attachment access, and downstream integration. Do not modify
+other archive instances.
 
 ## Verification contract
 
@@ -112,6 +111,6 @@ the other Hawk08 MsgVault instance.
 ## Definition of done
 
 The fork and feature branch exist; tests and builds pass; a digest-addressable
-preview is running without production changes; Aaron can review Google login and
-an exact-message link; focused upstream-ready commits and documentation exist; and
+preview is running without production changes; the operator can review Google login
+and an exact-message link; focused upstream-ready commits and documentation exist; and
 the production change remains gated on that review.

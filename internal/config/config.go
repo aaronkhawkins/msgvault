@@ -802,6 +802,11 @@ func decodeConfig(cfg *Config, path string, explicit, homeOverride bool, content
 	if err := cfg.GoogleOIDC.Validate(); err != nil {
 		return nil, err
 	}
+	// Keyless mode authorizes all requests, including requests forwarded by a
+	// same-host proxy. OIDC needs the API-key authentication boundary enabled.
+	if cfg.GoogleOIDC.Enabled && cfg.Server.APIKey == "" {
+		return nil, errors.New("[google_oidc] enabled requires [server] api_key to enforce authentication and provide recovery access")
+	}
 	cfg.Analytics.ApplyDefaults()
 	if err := cfg.Analytics.Validate(); err != nil {
 		return nil, err
