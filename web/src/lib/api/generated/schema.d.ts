@@ -3812,6 +3812,7 @@ export interface components {
             /** @enum {string} */
             auth_mode: "loopback" | "api_key" | "session" | "required";
             csrf_token?: string;
+            google_oidc_enabled: boolean;
             https: boolean;
             plain_http_warning: boolean;
         } & {

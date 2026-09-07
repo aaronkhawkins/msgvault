@@ -34,10 +34,11 @@ type SessionLoginRequest struct {
 // token is returned only for a valid browser session so mutation middleware
 // can enforce session-bound requests without exposing it to other auth modes.
 type SessionStatus struct {
-	AuthMode         AuthMode `json:"auth_mode" enum:"loopback,api_key,session,required"`
-	CSRFToken        string   `json:"csrf_token,omitempty"`
-	HTTPS            bool     `json:"https"`
-	PlainHTTPWarning bool     `json:"plain_http_warning"`
+	AuthMode          AuthMode `json:"auth_mode" enum:"loopback,api_key,session,required"`
+	CSRFToken         string   `json:"csrf_token,omitempty"`
+	HTTPS             bool     `json:"https"`
+	PlainHTTPWarning  bool     `json:"plain_http_warning"`
+	GoogleOIDCEnabled bool     `json:"google_oidc_enabled"`
 }
 
 func (s *Server) registerSessionRoutes(api huma.API) {
@@ -105,17 +106,8 @@ func (s *Server) handleSessionLogin(w http.ResponseWriter, r *http.Request) {
 	// Secure follows the verified connection scheme; plain HTTP support is an
 	// explicit deployment mode surfaced by PlainHTTPWarning.
 
-	http.SetCookie(w, &http.Cookie{ //nolint:gosec // Secure follows the verified request scheme; plain HTTP is an explicit supported mode.
-		Name:     sessionCookieName,
-		Value:    id,
-		Path:     "/",
-		Expires:  session.ExpiresAt,
-		MaxAge:   max(1, int(s.sessions.ttl/time.Second)),
-		HttpOnly: true,
-		Secure:   https,
-		SameSite: http.SameSiteStrictMode,
-	})
-	writeJSON(w, http.StatusOK, sessionStatus(AuthModeSession, session.CSRFToken, https))
+	s.setBrowserSessionCookie(w, id, session, https)
+	writeJSON(w, http.StatusOK, s.sessionStatus(AuthModeSession, session.CSRFToken, https))
 }
 
 func (s *Server) handleSessionBootstrap(w http.ResponseWriter, r *http.Request) {
@@ -124,7 +116,7 @@ func (s *Server) handleSessionBootstrap(w http.ResponseWriter, r *http.Request) 
 	if auth.Mode == AuthModeSession {
 		csrfToken = auth.Session.CSRFToken
 	}
-	writeJSON(w, http.StatusOK, sessionStatus(auth.Mode, csrfToken, requestUsesHTTPS(r)))
+	writeJSON(w, http.StatusOK, s.sessionStatus(auth.Mode, csrfToken, requestUsesHTTPS(r)))
 }
 
 func (s *Server) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
@@ -145,13 +137,27 @@ func (s *Server) handleSessionLogout(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 
-func sessionStatus(mode AuthMode, csrfToken string, https bool) SessionStatus {
+func (s *Server) sessionStatus(mode AuthMode, csrfToken string, https bool) SessionStatus {
 	return SessionStatus{
-		AuthMode:         mode,
-		CSRFToken:        csrfToken,
-		HTTPS:            https,
-		PlainHTTPWarning: !https,
+		AuthMode:          mode,
+		CSRFToken:         csrfToken,
+		HTTPS:             https,
+		PlainHTTPWarning:  !https,
+		GoogleOIDCEnabled: s.cfg.GoogleOIDC.Ready(),
 	}
+}
+
+func (s *Server) setBrowserSessionCookie(w http.ResponseWriter, id string, session browserSession, https bool) {
+	http.SetCookie(w, &http.Cookie{ //nolint:gosec // Secure follows the verified request scheme; plain HTTP is an explicit supported mode.
+		Name:     sessionCookieName,
+		Value:    id,
+		Path:     "/",
+		Expires:  session.ExpiresAt,
+		MaxAge:   max(1, int(s.sessions.ttl/time.Second)),
+		HttpOnly: true,
+		Secure:   https,
+		SameSite: http.SameSiteStrictMode,
+	})
 }
 
 func requestUsesHTTPS(r *http.Request) bool {

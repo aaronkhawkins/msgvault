@@ -69,6 +69,96 @@ type WebConfig struct {
 	Density           string `toml:"density"`
 }
 
+// GoogleOIDCConfig enables optional, single-user Google browser login. Client
+// credentials are resolved from environment variables so config.toml can stay
+// non-secret and the daemon's existing API key remains an independent machine
+// credential and browser recovery path.
+type GoogleOIDCConfig struct {
+	Enabled         bool   `toml:"enabled"`
+	Issuer          string `toml:"issuer"`
+	ClientIDEnv     string `toml:"client_id_env"`
+	ClientSecretEnv string `toml:"client_secret_env"`
+	RedirectURL     string `toml:"redirect_url"`
+	AllowedEmail    string `toml:"allowed_email"`
+	HostedDomain    string `toml:"hosted_domain"`
+}
+
+func (g *GoogleOIDCConfig) ApplyDefaults() {
+	g.Issuer = strings.TrimSpace(g.Issuer)
+	if g.Issuer == "" {
+		g.Issuer = "https://accounts.google.com"
+	}
+	g.ClientIDEnv = strings.TrimSpace(g.ClientIDEnv)
+	if g.ClientIDEnv == "" {
+		g.ClientIDEnv = "MSGVAULT_GOOGLE_CLIENT_ID"
+	}
+	g.ClientSecretEnv = strings.TrimSpace(g.ClientSecretEnv)
+	if g.ClientSecretEnv == "" {
+		g.ClientSecretEnv = "MSGVAULT_GOOGLE_CLIENT_SECRET"
+	}
+	g.AllowedEmail = strings.ToLower(strings.TrimSpace(g.AllowedEmail))
+	g.HostedDomain = strings.ToLower(strings.TrimSpace(g.HostedDomain))
+}
+
+func (g *GoogleOIDCConfig) Validate() error {
+	if !g.Enabled {
+		return nil
+	}
+	if !validEnvironmentName(g.ClientIDEnv) {
+		return fmt.Errorf("invalid [google_oidc] client_id_env %q", g.ClientIDEnv)
+	}
+	if !validEnvironmentName(g.ClientSecretEnv) {
+		return fmt.Errorf("invalid [google_oidc] client_secret_env %q", g.ClientSecretEnv)
+	}
+	issuer, err := url.Parse(g.Issuer)
+	if err != nil || issuer.Scheme != "https" || issuer.Host == "" || issuer.User != nil || issuer.RawQuery != "" || issuer.Fragment != "" {
+		return fmt.Errorf("invalid [google_oidc] issuer %q: must be an HTTPS origin", g.Issuer)
+	}
+	redirect, err := url.Parse(g.RedirectURL)
+	secureRedirect := err == nil && redirect.Scheme == "https"
+	loopbackPreview := err == nil && redirect.Scheme == "http" && strings.EqualFold(redirect.Hostname(), "localhost")
+	if err != nil || (!secureRedirect && !loopbackPreview) || redirect.Host == "" || redirect.User != nil || redirect.RawQuery != "" || redirect.Fragment != "" {
+		return fmt.Errorf("invalid [google_oidc] redirect_url %q: must use HTTPS, except for an HTTP localhost preview", g.RedirectURL)
+	}
+	if redirect.Path != "/auth/google/callback" {
+		return fmt.Errorf("invalid [google_oidc] callback path %q: want /auth/google/callback", redirect.Path)
+	}
+	address, err := mail.ParseAddress(g.AllowedEmail)
+	if err != nil || !strings.EqualFold(address.Address, g.AllowedEmail) {
+		return fmt.Errorf("invalid [google_oidc] allowed_email %q", g.AllowedEmail)
+	}
+	return nil
+}
+
+func (g *GoogleOIDCConfig) ClientID() string {
+	return strings.TrimSpace(os.Getenv(g.ClientIDEnv))
+}
+
+func (g *GoogleOIDCConfig) ClientSecret() string {
+	return strings.TrimSpace(os.Getenv(g.ClientSecretEnv))
+}
+
+func (g *GoogleOIDCConfig) Ready() bool {
+	return g.Enabled && g.ClientID() != "" && g.ClientSecret() != ""
+}
+
+func validEnvironmentName(value string) bool {
+	if value == "" {
+		return false
+	}
+	first := value[0]
+	if first != '_' && (first < 'A' || first > 'Z') {
+		return false
+	}
+	for index := 1; index < len(value); index++ {
+		character := value[index]
+		if character != '_' && (character < 'A' || character > 'Z') && (character < '0' || character > '9') {
+			return false
+		}
+	}
+	return true
+}
+
 func (w *WebConfig) ApplyDefaults() {
 	w.DefaultSearchMode = strings.ToLower(strings.TrimSpace(w.DefaultSearchMode))
 	if w.DefaultSearchMode == "" {
@@ -370,6 +460,7 @@ type Config struct {
 	Server       ServerConfig       `toml:"server"`
 	Analytics    AnalyticsConfig    `toml:"analytics"`
 	Web          WebConfig          `toml:"web"`
+	GoogleOIDC   GoogleOIDCConfig   `toml:"google_oidc"`
 	Integrations IntegrationsConfig `toml:"integrations"`
 	Remote       RemoteConfig       `toml:"remote"`
 	Vector       vector.Config      `toml:"vector"`
@@ -576,6 +667,7 @@ func NewDefaultConfig() *Config {
 	}
 	cfg.Vector.ApplyDefaults()
 	cfg.Server.ApplyDefaults()
+	cfg.GoogleOIDC.ApplyDefaults()
 	cfg.Discord.ApplyDefaults()
 	cfg.Web.ApplyDefaults()
 	cfg.Integrations.Tasks.ApplyDefaults()
@@ -702,8 +794,12 @@ func decodeConfig(cfg *Config, path string, explicit, homeOverride bool, content
 	// an explicit false in the file stays false.
 	cfg.Vector.ApplyDefaults()
 	cfg.Server.ApplyDefaults()
+	cfg.GoogleOIDC.ApplyDefaults()
 	cfg.Discord.ApplyDefaults()
 	if err := cfg.Server.Validate(); err != nil {
+		return nil, err
+	}
+	if err := cfg.GoogleOIDC.Validate(); err != nil {
 		return nil, err
 	}
 	cfg.Analytics.ApplyDefaults()

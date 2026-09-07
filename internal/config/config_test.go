@@ -428,6 +428,72 @@ func TestLoadRejectsMalformedServerTrustedProxy(t *testing.T) {
 	}
 }
 
+func TestLoadWithGoogleOIDCConfig(t *testing.T) {
+	assert := assert.New(t)
+	require := require.New(t)
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	require.NoError(os.WriteFile(configPath, []byte(`
+[google_oidc]
+enabled = true
+client_id_env = "MSGVAULT_GOOGLE_CLIENT_ID"
+client_secret_env = "MSGVAULT_GOOGLE_CLIENT_SECRET"
+redirect_url = "https://archive.example.com/auth/google/callback"
+allowed_email = "owner@example.com"
+hosted_domain = "example.com"
+`), 0o600))
+
+	cfg, err := Load(configPath, "")
+	require.NoError(err)
+	assert.True(cfg.GoogleOIDC.Enabled)
+	assert.Equal("https://accounts.google.com", cfg.GoogleOIDC.Issuer)
+	assert.Equal("MSGVAULT_GOOGLE_CLIENT_ID", cfg.GoogleOIDC.ClientIDEnv)
+	assert.Equal("MSGVAULT_GOOGLE_CLIENT_SECRET", cfg.GoogleOIDC.ClientSecretEnv)
+	assert.Equal("https://archive.example.com/auth/google/callback", cfg.GoogleOIDC.RedirectURL)
+	assert.Equal("owner@example.com", cfg.GoogleOIDC.AllowedEmail)
+	assert.Equal("example.com", cfg.GoogleOIDC.HostedDomain)
+}
+
+func TestLoadRejectsUnsafeGoogleOIDCConfig(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		message string
+	}{
+		{"missing owner", `enabled = true\nredirect_url = "https://archive.example.com/auth/google/callback"`, "allowed_email"},
+		{"non HTTPS callback", `enabled = true\nredirect_url = "http://archive.example.com/auth/google/callback"\nallowed_email = "owner@example.com"`, "redirect_url"},
+		{"callback path", `enabled = true\nredirect_url = "https://archive.example.com/wrong"\nallowed_email = "owner@example.com"`, "callback path"},
+		{"bad client env", `enabled = true\nclient_id_env = "not-valid"\nredirect_url = "https://archive.example.com/auth/google/callback"\nallowed_email = "owner@example.com"`, "client_id_env"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpDir := t.TempDir()
+			configPath := filepath.Join(tmpDir, "config.toml")
+			content := "[google_oidc]\n" + strings.ReplaceAll(tt.content, `\n`, "\n") + "\n"
+			require.NoError(t, os.WriteFile(configPath, []byte(content), 0o600))
+			_, err := Load(configPath, "")
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.message)
+		})
+	}
+}
+
+func TestLoadAllowsLoopbackGoogleOIDCPreview(t *testing.T) {
+	tmpDir := t.TempDir()
+	configPath := filepath.Join(tmpDir, "config.toml")
+	require.NoError(t, os.WriteFile(configPath, []byte(`
+[google_oidc]
+enabled = true
+redirect_url = "http://localhost:28082/auth/google/callback"
+allowed_email = "owner@example.com"
+`), 0o600))
+
+	cfg, err := Load(configPath, "")
+	require.NoError(t, err)
+	assert.Equal(t, "http://localhost:28082/auth/google/callback", cfg.GoogleOIDC.RedirectURL)
+}
+
 func TestLoadWithAnalyticsConfig(t *testing.T) {
 	assert := assert.
 		New(t)

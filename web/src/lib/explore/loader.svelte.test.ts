@@ -203,6 +203,38 @@ describe('ExploreLoader', () => {
     state.destroy();
   });
 
+  it('resolves an archive message permalink to the canonical row key after paging', async () => {
+    window.history.replaceState(null, '', '/m/3');
+    let explorePostCount = 0;
+    const fetchFn = vi.fn<typeof fetch>(async (input) => {
+      const path = new URL(input instanceof Request ? input.url : String(input)).pathname;
+      if (path !== '/api/v1/explore') return Response.json(exploreResponse());
+      explorePostCount += 1;
+      const page = explorePostCount;
+      return Response.json(exploreResponse({
+        rows: [{
+          ...entry(page),
+          key: `source:1:message:source-${page}`,
+          anchor_message_id: page,
+          conversation_id: 100
+        }],
+        total_count: 10_000,
+        ...(page < 4 ? { next_cursor: `cursor-${page}` } : {})
+      }));
+    });
+    const state = new ExploreState(window);
+    const { cleanup } = setup(fetchFn, state);
+
+    await vi.waitFor(() => expect(state.current.selectedRow).toBe('source:1:message:source-3'));
+    expect(state.current.activeRow).toBe('source:1:message:source-3');
+    expect(state.current.scrollAnchor).toEqual({ key: 'source:1:message:source-3', offset: 0 });
+    expect(state.current.conversationAnchor).toBe('3');
+    expect(explorePostCount).toBe(3);
+
+    cleanup();
+    state.destroy();
+  });
+
   it('keeps loaded rows and retries the same cursor after a transient load-more failure', async () => {
     window.history.replaceState(null, '', `/?explore=${encodeURIComponent(JSON.stringify({ workspace: 'everything' }))}`);
     const cursorsSeen: (string | undefined)[] = [];

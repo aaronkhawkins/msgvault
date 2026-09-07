@@ -4425,6 +4425,8 @@ components:
           type: string
         csrf_token:
           type: string
+        google_oidc_enabled:
+          type: boolean
         https:
           type: boolean
         plain_http_warning:
@@ -4433,6 +4435,7 @@ components:
         - auth_mode
         - https
         - plain_http_warning
+        - google_oidc_enabled
       type: object
     SetPersonAttributeRequest:
       additionalProperties: false

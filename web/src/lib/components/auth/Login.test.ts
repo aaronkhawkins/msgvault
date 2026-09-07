@@ -10,13 +10,34 @@ function response(status: number) {
       auth_mode: 'session',
       csrf_token: 'csrf-token',
       https: true,
-      plain_http_warning: false
+      plain_http_warning: false,
+      google_oidc_enabled: false
     });
   }
   return Response.json({ error: 'unauthorized', message: 'Invalid API key' }, { status });
 }
 
 describe('Login', () => {
+  it('offers Google login while retaining the exact permalink return path', () => {
+    window.history.replaceState(null, '', '/m/4242?from=personal-os');
+    const session = createSessionController();
+    session.status = {
+      auth_mode: 'required',
+      https: true,
+      plain_http_warning: false,
+      google_oidc_enabled: true
+    };
+
+    render(Login, { session });
+
+    const form = screen.getByRole('form', { name: 'Google sign in' });
+    expect(form.getAttribute('action')).toBe('/auth/google/login');
+    expect(form.querySelector<HTMLInputElement>('input[name="return_to"]')?.value)
+      .toBe('/m/4242?from=personal-os');
+    expect(screen.getByRole('button', { name: 'Continue with Google' })).toBeTruthy();
+    expect(screen.getByLabelText('API key')).toBeTruthy();
+  });
+
   it('exchanges the API key and leaves required mode on success', async () => {
     const fetchFn = vi.fn<typeof fetch>(async () => response(200));
     const session = createSessionController(fetchFn);

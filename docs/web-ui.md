@@ -67,6 +67,38 @@ for the key. A successful login creates an expiring, in-memory browser session.
 Daemon restarts, logout, expiry, and API-key activation invalidate sessions.
 Existing bearer-key API clients are unchanged.
 
+### Optional Google login
+
+Single-user deployments can add Google OIDC without changing API, CLI, or MCP
+authentication. The API key login remains available as a recovery path. Create a
+dedicated web OAuth client with the exact callback URL, then keep its credentials
+in environment variables rather than `config.toml`:
+
+```toml
+[google_oidc]
+enabled = true
+redirect_url = "https://archive.example.com/auth/google/callback"
+allowed_email = "owner@example.com"
+hosted_domain = "example.com"
+```
+
+The default credential names are `MSGVAULT_GOOGLE_CLIENT_ID` and
+`MSGVAULT_GOOGLE_CLIENT_SECRET`; `client_id_env` and `client_secret_env` can name
+different environment variables when the deployment requires it. The flow uses
+authorization code exchange with PKCE, state, nonce, issuer/audience/expiry
+verification, verified-email and exact allowlist checks, and a ten-minute
+transaction cookie. Google tokens are not persisted.
+
+Production callbacks require HTTPS. An HTTP callback is accepted only on the
+literal `localhost` host so an isolated local preview can use Google's loopback
+redirect support without weakening remote deployments.
+
+Links shaped as `/m/<archive-message-id>` open that exact message in Everything
+and survive login and refresh. The numeric ID is local to the current archive;
+do not treat it as portable across a database reimport. Keep any canonical source
+reference (for example `msgvault://<encoded-mailbox>/<archive-id>`) separately
+from this HTTPS presentation link.
+
 ## Remote access and HTTPS
 
 For remote access, set a strong API key and bind deliberately:

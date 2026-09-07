@@ -4088,10 +4088,11 @@ func (s SessionLoginRequest) Validate() error {
 }
 
 type SessionStatus struct {
-	AuthMode         SessionStatusAuthMode `json:"auth_mode" validate:"required"`
-	CsrfToken        *string               `json:"csrf_token,omitempty"`
-	HTTPS            bool                  `json:"https"`
-	PlainHTTPWarning bool                  `json:"plain_http_warning"`
+	AuthMode          SessionStatusAuthMode `json:"auth_mode" validate:"required"`
+	CsrfToken         *string               `json:"csrf_token,omitempty"`
+	GoogleOidcEnabled bool                  `json:"google_oidc_enabled"`
+	HTTPS             bool                  `json:"https"`
+	PlainHTTPWarning  bool                  `json:"plain_http_warning"`
 }
 
 func (s SessionStatus) Validate() error {

@@ -17,6 +17,27 @@ import { createAllMatchingSelection, predicateFingerprint } from './selection';
 import { SEARCH_MODE_PREFERENCE_KEY } from '../search/modes';
 
 describe('Explore URL state', () => {
+  it('opens a stable message permalink as an exact Everything selection', () => {
+    window.history.replaceState(null, '', '/m/4242');
+    const state = new ExploreState(window);
+
+    expect(state.current.workspace).toBe('everything');
+    expect(state.current.selectedRow).toBe('message:4242');
+    expect(state.current.activeRow).toBe('message:4242');
+    expect(state.current.scrollAnchor).toEqual({ key: 'message:4242', offset: 0 });
+    expect(window.location.pathname).toBe('/m/4242');
+    state.destroy();
+  });
+
+  it.each(['/m/0', '/m/-1', '/m/not-a-number', '/m/42/more'])('ignores invalid message permalink %s', (path) => {
+    window.history.replaceState(null, '', path);
+    const state = new ExploreState(window);
+
+    expect(state.current.workspace).toBe('relationships');
+    expect(state.current.selectedRow).toBeNull();
+    state.destroy();
+  });
+
   it('round-trips every primary management workspace through the URL', () => {
     for (const workspace of ['saved_views', 'sources', 'deletions'] as const) {
       const parsed = parseExploreURLState(serializeExploreURLState({

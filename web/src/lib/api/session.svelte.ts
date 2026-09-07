@@ -33,6 +33,10 @@ export class SessionController {
     return this.status?.csrf_token;
   }
 
+  get googleOIDCEnabled(): boolean {
+    return this.status?.google_oidc_enabled ?? false;
+  }
+
   async bootstrap(): Promise<void> {
     this.loading = true;
     this.error = undefined;
@@ -96,7 +100,8 @@ export class SessionController {
     this.status = {
       auth_mode: 'required',
       https: this.status?.https ?? false,
-      plain_http_warning: this.status?.plain_http_warning ?? true
+      plain_http_warning: this.status?.plain_http_warning ?? true,
+      google_oidc_enabled: this.status?.google_oidc_enabled ?? false
     };
   }
 }

@@ -40,6 +40,7 @@ export interface ExploreLoaderCallbacks {
 const REPEATED_CURSOR_NOTICE = 'Pagination stopped because the server repeated a cursor without progress.';
 const NO_PROGRESS_NOTICE = 'Pagination stopped because the next page made no row progress.';
 const REVISION_CHANGED_NOTICE = 'Results changed while loading another page. Reload this view.';
+const ARCHIVE_MESSAGE_SELECTION_PATTERN = /^message:([1-9]\d*)$/;
 export const END_PAUSE_NOTICE =
   'End paused loading to keep the table responsive; press End again to continue or refine the filters.';
 
@@ -50,6 +51,13 @@ function samePageAuthority(
   return next.cacheRevision === first.cacheRevision &&
     canonicalFingerprint(next.searchProvenance) === canonicalFingerprint(first.searchProvenance) &&
     next.candidateSnapshotId === first.candidateSnapshotId;
+}
+
+function archiveMessageSelectionID(key: string): number | undefined {
+  const match = key.match(ARCHIVE_MESSAGE_SELECTION_PATTERN);
+  if (!match) return undefined;
+  const id = Number(match[1]);
+  return Number.isSafeInteger(id) ? id : undefined;
 }
 
 /**
@@ -205,6 +213,7 @@ export class ExploreLoader {
           const entryResult = loaded.result as ExploreResult;
           this.result = entryResult;
           this.rows = entryResult.rows;
+          this.resolveArchiveMessageSelection();
           this.groupRows = [];
           this.fileFacts = [];
           this.resultFingerprint = fingerprint;
@@ -328,6 +337,7 @@ export class ExploreLoader {
         const merged = new Map(this.rows.map((row) => [row.key, row]));
         for (const row of entryResult.rows) merged.set(row.key, row);
         this.rows = [...merged.values()];
+        this.resolveArchiveMessageSelection();
         this.nextCursor = followingCursor;
         this.result = { ...entryResult, rows: this.rows, nextCursor: followingCursor };
       } else if (this.pageKind === 'groups') {
@@ -409,7 +419,27 @@ export class ExploreLoader {
       return this.groupRows.some((row) => `group:${this.pageGrouping}:${row.key}` === key);
     }
     if (this.pageKind === 'files') return this.fileFacts.some((file) => file.key === key);
-    return this.rows.some((row) => row.key === key);
+    const archiveMessageID = archiveMessageSelectionID(key);
+    return this.rows.some((row) => row.key === key ||
+      (archiveMessageID !== undefined && row.anchor_message_id === archiveMessageID));
+  }
+
+  private resolveArchiveMessageSelection(): void {
+    const current = this.state.current;
+    const selected = current.selectedRow;
+    if (!selected) return;
+    const archiveMessageID = archiveMessageSelectionID(selected);
+    if (archiveMessageID === undefined) return;
+    const row = this.rows.find((candidate) => candidate.anchor_message_id === archiveMessageID);
+    if (!row || row.key === selected) return;
+    this.state.replaceTransient({
+      selectedRow: row.key,
+      activeRow: current.activeRow === selected ? row.key : current.activeRow,
+      scrollAnchor: current.scrollAnchor?.key === selected
+        ? { key: row.key, offset: current.scrollAnchor.offset }
+        : current.scrollAnchor,
+      conversationAnchor: String(archiveMessageID)
+    });
   }
 
   private async restoreDeepState(

@@ -41,11 +41,11 @@ func newSessionStore(ttl time.Duration) *sessionStore {
 }
 
 func (s *sessionStore) create() (string, browserSession, error) {
-	id, err := s.randomToken()
+	id, err := randomURLToken(s.random)
 	if err != nil {
 		return "", browserSession{}, fmt.Errorf("generate session ID: %w", err)
 	}
-	csrfToken, err := s.randomToken()
+	csrfToken, err := randomURLToken(s.random)
 	if err != nil {
 		return "", browserSession{}, fmt.Errorf("generate CSRF token: %w", err)
 	}
@@ -103,9 +103,9 @@ func (s *sessionStore) Close() {
 	s.mu.Unlock()
 }
 
-func (s *sessionStore) randomToken() (string, error) {
+func randomURLToken(reader io.Reader) (string, error) {
 	raw := make([]byte, randomTokenBytes)
-	if _, err := io.ReadFull(s.random, raw); err != nil {
+	if _, err := io.ReadFull(reader, raw); err != nil {
 		return "", err
 	}
 	return base64.RawURLEncoding.EncodeToString(raw), nil

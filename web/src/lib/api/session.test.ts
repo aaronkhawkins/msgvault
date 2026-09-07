@@ -10,7 +10,8 @@ function sessionResponse(
     auth_mode: authMode,
     ...(csrfToken ? { csrf_token: csrfToken } : {}),
     https: false,
-    plain_http_warning: true
+    plain_http_warning: true,
+    google_oidc_enabled: false
   });
 }
 

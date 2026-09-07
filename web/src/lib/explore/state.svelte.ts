@@ -29,6 +29,7 @@ import {
 } from '../search/modes';
 
 const STATE_PARAMETER = 'explore';
+const MESSAGE_PERMALINK_PATTERN = /^\/m\/([1-9]\d*)$/;
 const FILTER_DIMENSIONS = new Set([
   'source',
   'identity',
@@ -496,7 +497,19 @@ export class ExploreState {
   }
 
   private readURLState(): ExploreURLState {
-    const parsed = parseExploreURLState(this.browser.location.search);
+    let parsed = parseExploreURLState(this.browser.location.search);
+    const hasExplicitState = new URLSearchParams(this.browser.location.search).has(STATE_PARAMETER);
+    const permalink = hasExplicitState ? null : this.browser.location.pathname.match(MESSAGE_PERMALINK_PATTERN);
+    if (permalink) {
+      const key = `message:${permalink[1]}`;
+      parsed = {
+        ...freshDefaults(),
+        workspace: 'everything',
+        selectedRow: key,
+        activeRow: key,
+        scrollAnchor: { key, offset: 0 }
+      };
+    }
     parsed.searchMode = resolveInitialSearchMode(
       explicitSearchModeFromURL(this.browser.location.search),
       this.preferenceStorage,

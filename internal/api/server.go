@@ -328,9 +328,12 @@ type Server struct {
 	remoteImages *remoteImageFetcher
 	// inlineCache parses each message's raw MIME once and serves every cid: from
 	// that result, collapsing the per-cid fan-out (see inline_cache.go).
-	inlineCache *inlineParseCache
-	spaHandler  http.Handler
-	sessions    *sessionStore
+	inlineCache            *inlineParseCache
+	spaHandler             http.Handler
+	sessions               *sessionStore
+	googleOIDCProvider     googleOIDCProvider
+	googleOIDCTransactions *googleOIDCTransactionStore
+	googleOIDCMu           sync.Mutex
 	// trustedProxies contains only explicitly configured direct proxy peers.
 	// Forwarded scheme/host data is ignored for every other RemoteAddr.
 	trustedProxies   []netip.Prefix
@@ -444,6 +447,8 @@ type ServerOptions struct {
 	// FastmailInventoryFactory is the provider-read seam used by identity
 	// discovery. Nil constructs the production JMAP client.
 	FastmailInventoryFactory provideridentity.Factory
+	// googleOIDCProvider overrides discovery and token verification in tests.
+	googleOIDCProvider googleOIDCProvider
 }
 
 // NewServer creates a new API server.
@@ -495,6 +500,8 @@ func NewServerWithOptions(opts ServerOptions) *Server {
 		inlineCache:              newInlineParseCache(inlineCacheMaxEntries, inlineCacheMaxBytes),
 		spaHandler:               opts.SPAHandler,
 		sessions:                 newSessionStore(defaultSessionTTL),
+		googleOIDCProvider:       opts.googleOIDCProvider,
+		googleOIDCTransactions:   newGoogleOIDCTransactionStore(10 * time.Minute),
 		exploreState:             newExploreServerState(time.Now),
 		exploreCursorKey:         newExploreCursorKey(),
 		trustedProxies:           trustedProxyPrefixes(opts.Config.Server.TrustedProxies),
@@ -537,6 +544,7 @@ func (s *Server) setupRouter() http.Handler {
 	api := s.setupHumaAPI(mux)
 	apiV1 := s.setupAPIV1Group(api)
 	s.registerHumaRoutes(api, apiV1)
+	s.registerGoogleOIDCRoutes(mux)
 	s.registerPprofHandlers(mux)
 
 	// Registered API, debug, OpenAPI, and docs routes retain priority over the
