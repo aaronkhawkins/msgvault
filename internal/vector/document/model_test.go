@@ -38,6 +38,8 @@ func TestFingerprintBindsDocumentExtractionAndEmbeddingPolicy(t *testing.T) {
 		{name: "max input chars", mutate: func(c *vector.Config) { c.Embeddings.MaxInputChars++ }},
 		{name: "document prefix", mutate: func(c *vector.Config) { c.Embeddings.DocumentPrefix = "search_document: " }},
 		{name: "query prefix", mutate: func(c *vector.Config) { c.Embeddings.QueryPrefix = "search_query: " }},
+		{name: "passage input type", mutate: func(c *vector.Config) { c.Embeddings.PassageInputType = "passage" }},
+		{name: "query input type", mutate: func(c *vector.Config) { c.Embeddings.QueryInputType = "query" }},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

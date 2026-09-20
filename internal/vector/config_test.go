@@ -27,6 +27,8 @@ batch_size = 32
 timeout = "15s"
 max_retries = 2
 max_input_chars = 16000
+passage_input_type = "passage"
+query_input_type = "query"
 
 [preprocess]
 strip_quotes = true
@@ -49,6 +51,8 @@ run_after_sync = true
 	assert.Equal("sqlite-vec", c.Backend)
 	assert.Equal(768, c.Embeddings.Dimension)
 	assert.Equal(15*time.Second, c.Embeddings.Timeout)
+	assert.Equal("passage", c.Embeddings.PassageInputType)
+	assert.Equal("query", c.Embeddings.QueryInputType)
 	assert.Equal(60, c.Search.RRFK)
 }
 
@@ -92,6 +96,30 @@ func TestConfig_Validate(t *testing.T) {
 			c.Embeddings.DocumentPrefix = strings.Repeat("x", maxEmbeddingTaskPrefixUTF8Bytes)
 			c.Embeddings.QueryPrefix = strings.Repeat("x", maxEmbeddingTaskPrefixUTF8Bytes)
 		}, ""},
+		{"PassageInputTypeRequiresQuery", func(c *Config) {
+			c.Embeddings.PassageInputType = "passage"
+		}, "input_type"},
+		{"QueryInputTypeRequiresPassage", func(c *Config) {
+			c.Embeddings.QueryInputType = "query"
+		}, "input_type"},
+		{"InputTypesOK", func(c *Config) {
+			c.Embeddings.PassageInputType = "passage"
+			c.Embeddings.QueryInputType = "query"
+		}, ""},
+		{"InputTypesRequireOpenAIFormat", func(c *Config) {
+			c.Embeddings.APIFormat = APIFormatVoyageContextual
+			c.Embeddings.Model = "voyage-context-4"
+			c.Embeddings.PassageInputType = "passage"
+			c.Embeddings.QueryInputType = "query"
+		}, "require api_format=\"openai\""},
+		{"InputTypeInvalidToken", func(c *Config) {
+			c.Embeddings.PassageInputType = "not a token"
+			c.Embeddings.QueryInputType = "query"
+		}, "passage_input_type"},
+		{"InputTypeTooLarge", func(c *Config) {
+			c.Embeddings.PassageInputType = strings.Repeat("p", maxEmbeddingInputTypeUTF8Bytes+1)
+			c.Embeddings.QueryInputType = "query"
+		}, "passage_input_type"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -526,6 +554,23 @@ func TestConfig_GenerationFingerprint_EmbeddingPrefixEncodingIsUnambiguous(t *te
 	right.Embeddings.QueryPrefix = "b\x1fc"
 
 	assert.NotEqual(t, left.GenerationFingerprint(), right.GenerationFingerprint())
+}
+
+func TestConfig_GenerationFingerprint_IncludesOpenAIInputTypes(t *testing.T) {
+	base := Config{Embeddings: EmbeddingsConfig{
+		Model: "m", Dimension: 8, MaxInputChars: 2000,
+	}}
+	configured := base
+	configured.Embeddings.PassageInputType = "passage"
+	configured.Embeddings.QueryInputType = "query"
+	changedPassage := configured
+	changedPassage.Embeddings.PassageInputType = "document"
+	changedQuery := configured
+	changedQuery.Embeddings.QueryInputType = "search_query"
+
+	assert.NotEqual(t, base.GenerationFingerprint(), configured.GenerationFingerprint())
+	assert.NotEqual(t, configured.GenerationFingerprint(), changedPassage.GenerationFingerprint())
+	assert.NotEqual(t, configured.GenerationFingerprint(), changedQuery.GenerationFingerprint())
 }
 
 // TestConfig_GenerationFingerprint_IncludesEmbedPolicyVersion pins the

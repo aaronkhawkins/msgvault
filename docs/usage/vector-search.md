@@ -114,6 +114,9 @@ model = "nomic-embed-text"
 dimension = 768
 document_prefix = "search_document: "  # required by nomic-embed-text
 query_prefix = "search_query: "        # required by nomic-embed-text
+# Optional paired extension for providers that distinguish retrieval roles:
+# passage_input_type = "passage"
+# query_input_type = "query"
 batch_size = 32                          # embeddings per HTTP call
 timeout = "30s"
 max_retries = 3
@@ -189,6 +192,11 @@ msgvault prepends `document_prefix` to every chunk after chunking and
 reduce the `max_input_chars` content budget. Changing either prefix marks
 the existing vector generation stale so prefixed queries cannot be mixed
 with an index built from unprefixed documents.
+
+Some OpenAI-compatible providers instead accept an `input_type` request
+field. Configure `passage_input_type` and `query_input_type` together to send
+the passage value while indexing and the query value while searching. Leave
+both unset for providers that implement only the standard request shape.
 
 ### Matching `max_input_chars` to your embedder's context window
 

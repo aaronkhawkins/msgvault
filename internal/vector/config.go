@@ -31,6 +31,7 @@ const (
 	// Bounding them prevents one prefix from exhausting contextual request
 	// budgets before any source text can be assembled.
 	maxEmbeddingTaskPrefixUTF8Bytes = 4096
+	maxEmbeddingInputTypeUTF8Bytes  = 64
 )
 
 // preprocessVersion identifies the embed/preprocess.go implementation
@@ -76,6 +77,7 @@ const (
 )
 
 var environmentVariableName = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)
+var embeddingInputType = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]*$`)
 
 // Config is the top-level vector-search configuration, loaded from the
 // [vector] TOML table.
@@ -182,12 +184,17 @@ type EmbeddingsConfig struct {
 	Model          string             `toml:"model"`
 	DocumentPrefix string             `toml:"document_prefix"`
 	QueryPrefix    string             `toml:"query_prefix"`
-	Dimension      int                `toml:"dimension"`
-	BatchSize      int                `toml:"batch_size"`
-	Timeout        time.Duration      `toml:"timeout"`
-	MaxRetries     int                `toml:"max_retries"`
-	MaxInputChars  int                `toml:"max_input_chars"`
-	ETAWindow      int                `toml:"eta_window"`
+	// PassageInputType and QueryInputType enable the optional input_type
+	// extension used by some OpenAI-compatible providers. Configure both or
+	// neither so index and query vectors always use one coherent policy.
+	PassageInputType string        `toml:"passage_input_type"`
+	QueryInputType   string        `toml:"query_input_type"`
+	Dimension        int           `toml:"dimension"`
+	BatchSize        int           `toml:"batch_size"`
+	Timeout          time.Duration `toml:"timeout"`
+	MaxRetries       int           `toml:"max_retries"`
+	MaxInputChars    int           `toml:"max_input_chars"`
+	ETAWindow        int           `toml:"eta_window"`
 }
 
 // EffectiveAPIFormat returns the configured API format, defaulting to the
@@ -239,6 +246,23 @@ func (e EmbeddingsConfig) Validate() error {
 	if len(e.QueryPrefix) > maxEmbeddingTaskPrefixUTF8Bytes {
 		return fmt.Errorf("vector.embeddings.query_prefix: must be at most %d UTF-8 bytes, got %d",
 			maxEmbeddingTaskPrefixUTF8Bytes, len(e.QueryPrefix))
+	}
+	if (e.PassageInputType == "") != (e.QueryInputType == "") {
+		return errors.New("vector.embeddings input_type policy: passage_input_type and query_input_type must be configured together")
+	}
+	if e.PassageInputType != "" && e.EffectiveAPIFormat() != APIFormatOpenAI {
+		return errors.New("vector.embeddings input_type policy: passage_input_type and query_input_type require api_format=\"openai\"")
+	}
+	for name, value := range map[string]string{
+		"passage_input_type": e.PassageInputType,
+		"query_input_type":   e.QueryInputType,
+	} {
+		if value == "" {
+			continue
+		}
+		if len(value) > maxEmbeddingInputTypeUTF8Bytes || !embeddingInputType.MatchString(value) {
+			return fmt.Errorf("vector.embeddings.%s: must be a provider token of at most %d UTF-8 bytes", name, maxEmbeddingInputTypeUTF8Bytes)
+		}
 	}
 	if e.Dimension <= 0 {
 		return fmt.Errorf("vector.embeddings.dimension: must be positive, got %d", e.Dimension)
@@ -434,7 +458,8 @@ func (e EmbeddingsConfig) Fingerprint() string {
 // GenerationFingerprint returns the full identifier used to compare an
 // index generation against the configured policy. Format:
 // "<model>:<dimension>:<preprocess>:c<max_input_chars>:e<embed_policy>".
-// Non-empty document or query prefixes add a hashed ":t<digest>" segment.
+// Non-empty document/query prefixes add a hashed ":t<digest>" segment, and
+// non-empty passage/query input roles add a hashed ":i<digest>" segment.
 // Contextual generations add
 // ":avoyage-contextual:v<context_policy_version>" before any scope segment.
 // Every segment is derived from the effective config (or a code-level
@@ -468,6 +493,9 @@ func (c *Config) GenerationFingerprint() string {
 	if taskPrefixFingerprint := c.Embeddings.TaskPrefixFingerprint(); taskPrefixFingerprint != "" {
 		fp += ":t" + taskPrefixFingerprint
 	}
+	if inputTypeFingerprint := c.Embeddings.InputTypeFingerprint(); inputTypeFingerprint != "" {
+		fp += ":i" + inputTypeFingerprint
+	}
 	if c.Embeddings.EffectiveAPIFormat() == APIFormatVoyageContextual {
 		fp = fmt.Sprintf("%s:a%s:v%d", fp, APIFormatVoyageContextual, contextPolicyVersion)
 	}
@@ -481,11 +509,22 @@ func (c *Config) GenerationFingerprint() string {
 // exposing configured prefix text. Empty policy deliberately has no identity
 // so existing generation fingerprints retain their exact legacy bytes.
 func (e EmbeddingsConfig) TaskPrefixFingerprint() string {
-	if e.DocumentPrefix == "" && e.QueryPrefix == "" {
+	return embeddingRoleFingerprint("embedding-prefix-v1", e.DocumentPrefix, e.QueryPrefix)
+}
+
+// InputTypeFingerprint identifies the optional OpenAI-compatible input role
+// policy without exposing provider-specific values in status output. An
+// omitted policy deliberately preserves legacy generation fingerprints.
+func (e EmbeddingsConfig) InputTypeFingerprint() string {
+	return embeddingRoleFingerprint("openai-input-type-v1", e.PassageInputType, e.QueryInputType)
+}
+
+func embeddingRoleFingerprint(namespace, documentValue, queryValue string) string {
+	if documentValue == "" && queryValue == "" {
 		return ""
 	}
-	encoded := fmt.Sprintf("embedding-prefix-v1:%d:%s:%d:%s",
-		len(e.DocumentPrefix), e.DocumentPrefix, len(e.QueryPrefix), e.QueryPrefix)
+	encoded := fmt.Sprintf("%s:%d:%s:%d:%s",
+		namespace, len(documentValue), documentValue, len(queryValue), queryValue)
 	digest := sha256.Sum256([]byte(encoded))
 	return hex.EncodeToString(digest[:])
 }

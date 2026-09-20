@@ -113,10 +113,12 @@ func Fingerprint(extractionProfileID string, cfg vector.Config) (string, error) 
 		RecipeFingerprint     string `json:"recipe_fingerprint"`
 		VectorSpace           string `json:"vector_space_fingerprint"`
 		TaskPrefixFingerprint string `json:"task_prefix_fingerprint,omitempty"`
+		InputTypeFingerprint  string `json:"input_type_fingerprint,omitempty"`
 	}{
 		Version: 1, ExtractionProfileID: extractionProfileID,
 		RecipeFingerprint: recipe.Fingerprint(), VectorSpace: spaceFingerprint,
 		TaskPrefixFingerprint: cfg.Embeddings.TaskPrefixFingerprint(),
+		InputTypeFingerprint:  cfg.Embeddings.InputTypeFingerprint(),
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {

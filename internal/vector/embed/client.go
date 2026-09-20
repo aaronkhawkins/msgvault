@@ -39,6 +39,10 @@ type Config struct {
 	DocumentPrefix string
 	// QueryPrefix is prepended to every query before it is sent.
 	QueryPrefix string
+	// PassageInputType and QueryInputType are an optional paired extension for
+	// providers that distinguish indexed passages from retrieval queries.
+	PassageInputType string
+	QueryInputType   string
 	// Dimension is the expected vector dimension. Responses whose vectors
 	// differ are rejected with an error.
 	Dimension int
@@ -75,8 +79,9 @@ func NewClient(cfg Config) *Client {
 
 // embeddingRequest is the JSON body sent to the server.
 type embeddingRequest struct {
-	Input []string `json:"input"`
-	Model string   `json:"model"`
+	Input     []string `json:"input"`
+	Model     string   `json:"model"`
+	InputType string   `json:"input_type,omitempty"`
 }
 
 // embeddingResponse is the JSON response body from the server.
@@ -97,14 +102,17 @@ type embeddingResponse struct {
 // 429 response's Retry-After header (when present and parseable) overrides
 // the backoff for that attempt. Other 4xx responses fail immediately.
 func (c *Client) Embed(ctx context.Context, inputs []string) ([][]float32, error) {
-	return c.embed(ctx, prependPrefix(inputs, c.cfg.DocumentPrefix))
+	return c.embed(ctx, prependPrefix(inputs, c.cfg.DocumentPrefix), c.cfg.PassageInputType)
 }
 
-func (c *Client) embed(ctx context.Context, inputs []string) ([][]float32, error) {
+func (c *Client) embed(ctx context.Context, inputs []string, inputType string) ([][]float32, error) {
 	if len(inputs) == 0 {
 		return nil, nil
 	}
-	body, err := json.Marshal(embeddingRequest{Input: inputs, Model: c.cfg.Model})
+	if (c.cfg.PassageInputType == "") != (c.cfg.QueryInputType == "") {
+		return nil, errors.New("embed: passage and query input types must be configured together")
+	}
+	body, err := json.Marshal(embeddingRequest{Input: inputs, Model: c.cfg.Model, InputType: inputType})
 	if err != nil {
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
@@ -158,7 +166,7 @@ func (c *Client) embed(ctx context.Context, inputs []string) ([][]float32, error
 
 // EmbedQuery embeds one query and returns its single vector.
 func (c *Client) EmbedQuery(ctx context.Context, text string) ([]float32, error) {
-	vecs, err := c.embed(ctx, prependPrefix([]string{text}, c.cfg.QueryPrefix))
+	vecs, err := c.embed(ctx, prependPrefix([]string{text}, c.cfg.QueryPrefix), c.cfg.QueryInputType)
 	if err != nil {
 		return nil, err
 	}
@@ -176,7 +184,7 @@ func (c *Client) EmbedDocuments(ctx context.Context, documents []DocumentInput) 
 		inputs = append(inputs, document.Chunks...)
 	}
 
-	vecs, err := c.embed(ctx, prependPrefix(inputs, c.cfg.DocumentPrefix))
+	vecs, err := c.embed(ctx, prependPrefix(inputs, c.cfg.DocumentPrefix), c.cfg.PassageInputType)
 	if err != nil {
 		return nil, err
 	}
