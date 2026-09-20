@@ -114,6 +114,9 @@ model = "nomic-embed-text"
 dimension = 768
 document_prefix = "search_document: "  # required by nomic-embed-text
 query_prefix = "search_query: "        # required by nomic-embed-text
+# Optional paired extension for providers that distinguish retrieval roles:
+# passage_input_type = "passage"
+# query_input_type = "query"
 batch_size = 32                          # embeddings per HTTP call
 timeout = "30s"
 max_retries = 3
@@ -190,6 +193,11 @@ reduce the `max_input_chars` content budget. Changing either prefix marks
 the existing vector generation stale so prefixed queries cannot be mixed
 with an index built from unprefixed documents.
 
+Some OpenAI-compatible providers instead accept an `input_type` request
+field. Configure `passage_input_type` and `query_input_type` together to send
+the passage value while indexing and the query value while searching. Leave
+both unset for providers that implement only the standard request shape.
+
 ### Matching `max_input_chars` to your embedder's context window
 
 `max_input_chars` is an upper bound in characters per embedding
@@ -210,10 +218,9 @@ Practical guidance:
 - **Self-hosted models:** match the actual context window exposed by
   your server, not just the upstream model card.
 
-If `msgvault embeddings build` logs `HTTP 400`, msgvault now includes
-the response body from the embedder when available. Check both the
-CLI log and the embedder's own logs. `the input length exceeds the
-context length` confirms you need to lower `max_input_chars`.
+If `msgvault embeddings build` logs `HTTP 400`, inspect the embedder's
+own protected logs for the cause. Msgvault deliberately retains only the
+status classification so provider response text cannot leak message content.
 
 ## Initial Embedding
 
@@ -521,13 +528,12 @@ body keywords.
 | `invalid_mode` | The requested mode is not supported by that surface. | Use `fts`, `vector`, or `hybrid` on the CLI or HTTP; use `vector`, `hybrid`, or omitted `mode` in MCP. |
 | `embedding_timeout` | The embedding endpoint did not respond before the request deadline (transient: slow/cold model, network blip). | Retry; if persistent, raise `[vector.embeddings].timeout` or use a faster endpoint. |
 
-For non-429 HTTP 4xx errors, msgvault treats the response as
-permanent and includes up to the first few KiB of the response body in
-the error. If a batch contains both good and bad rows, the worker
+For non-429 HTTP 4xx errors, msgvault treats the response as permanent and
+retains only the HTTP status. If a batch contains both good and bad rows, the worker
 downshifts to smaller batches and then single-message requests so
 valid messages can still be embedded while the failing row is dropped
-or reported. If the body says `the input length exceeds the context
-length` (Ollama) or an equivalent token-limit error, lower
+or reported. When the provider reports an input-length error in its own
+protected logs, lower
 `max_input_chars` to match the model's context window. See the sizing
 guidance above.
 

@@ -142,6 +142,70 @@ func TestClient_AppliesEmbeddingPrefixesByRole(t *testing.T) {
 	}, calls)
 }
 
+func TestClient_AppliesOpenAIInputTypeByRole(t *testing.T) {
+	check := assert.New(t)
+	must := require.New(t)
+	var calls []embeddingRequest
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		request := decodeRequest(t, r)
+		calls = append(calls, request)
+		vectors := make([][]float32, len(request.Input))
+		for i := range vectors {
+			vectors[i] = []float32{float32(i + 1)}
+		}
+		writeEmbeddings(t, w, vectors)
+	}))
+	t.Cleanup(server.Close)
+	client := NewClient(Config{
+		Endpoint: server.URL, Model: "test-model", Dimension: 1,
+		PassageInputType: "passage", QueryInputType: "query",
+	})
+
+	_, err := client.EmbedDocuments(t.Context(), []DocumentInput{{Chunks: []string{"document"}}})
+	must.NoError(err)
+	_, err = client.EmbedQuery(t.Context(), "find this")
+	must.NoError(err)
+	_, err = client.Embed(t.Context(), []string{"worker document"})
+	must.NoError(err)
+
+	must.Len(calls, 3)
+	check.Equal("passage", calls[0].InputType)
+	check.Equal("query", calls[1].InputType)
+	check.Equal("passage", calls[2].InputType)
+}
+
+func TestClient_OmitsOpenAIInputTypeWhenUnconfigured(t *testing.T) {
+	var raw map[string]json.RawMessage
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&raw))
+		writeEmbeddings(t, w, [][]float32{{1}})
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewClient(Config{Endpoint: server.URL, Model: "test-model", Dimension: 1})
+	_, err := client.EmbedQuery(t.Context(), "find this")
+	require.NoError(t, err)
+	assert.NotContains(t, raw, "input_type")
+}
+
+func TestClient_RejectsIncompleteOpenAIInputTypeBeforeRequest(t *testing.T) {
+	var requests atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		requests.Add(1)
+		writeEmbeddings(t, w, [][]float32{{1}})
+	}))
+	t.Cleanup(server.Close)
+
+	client := NewClient(Config{
+		Endpoint: server.URL, Model: "test-model", Dimension: 1,
+		QueryInputType: "query",
+	})
+	_, err := client.EmbedQuery(t.Context(), "find this")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "configured together")
+	assert.Equal(t, int32(0), requests.Load())
+}
+
 // TestClientBeforeRequestFencesEveryRetryAttempt catches a consent check that
 // runs once around the logical embedding operation instead of immediately
 // before every real HTTP attempt. Query retries are included because curated
@@ -401,7 +465,7 @@ func TestClient_Embed_Does_Not_Retry_4xx(t *testing.T) {
 	require.Error(t, err, "expected error for 4xx")
 	assert.Equal(int32(1), attempts.Load(), "no retry on 4xx")
 	require.ErrorContains(t, err, "400")
-	assert.ErrorContains(err, "No models loaded")
+	assert.NotContains(err.Error(), "No models loaded")
 }
 
 func TestClient_Embed_AuthHeader(t *testing.T) {
@@ -684,8 +748,8 @@ func TestClient_Embed_4xxIsPermanent(t *testing.T) {
 	_, err := c.Embed(context.Background(), []string{"hello"})
 	require.Error(t, err, "expected error on 400")
 	require.ErrorIs(t, err, ErrPermanent4xx)
-	// Existing contract: body must still be in the message.
-	assert.ErrorContains(t, err, "Invalid input")
+	assert.ErrorContains(t, err, "HTTP 400")
+	assert.NotContains(t, err.Error(), "Invalid input")
 }
 
 func TestClient_Embed_5xxNotPermanent(t *testing.T) {

@@ -253,9 +253,11 @@ func newEmbeddingRuntime(vectorCfg vector.Config, deps embeddingRuntimeDeps) (*e
 			Endpoint: vectorCfg.Embeddings.Endpoint, APIKey: apiKey,
 			Model: vectorCfg.Embeddings.Model, Dimension: vectorCfg.Embeddings.Dimension,
 			Timeout: vectorCfg.Embeddings.Timeout, MaxRetries: vectorCfg.Embeddings.MaxRetries,
-			DocumentPrefix:  vectorCfg.Embeddings.DocumentPrefix,
-			QueryPrefix:     vectorCfg.Embeddings.QueryPrefix,
-			RejectRedirects: true,
+			DocumentPrefix:   vectorCfg.Embeddings.DocumentPrefix,
+			QueryPrefix:      vectorCfg.Embeddings.QueryPrefix,
+			PassageInputType: vectorCfg.Embeddings.PassageInputType,
+			QueryInputType:   vectorCfg.Embeddings.QueryInputType,
+			RejectRedirects:  true,
 		}
 		messageClient := embed.NewClient(clientConfig)
 		documentClientConfig := clientConfig

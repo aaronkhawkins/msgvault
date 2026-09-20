@@ -165,7 +165,6 @@ func runHTTPSearch(cmd *cobra.Command, queryStr string) error {
 		"offset", searchOffset,
 	)
 	logger.Debug("search start detail",
-		"query", queryStr,
 		"account", searchAccount,
 		"collection", searchCollection,
 	)
@@ -193,7 +192,7 @@ func runHTTPSearch(cmd *cobra.Command, queryStr string) error {
 		logger.Warn("search failed",
 			"query_len", len(queryStr),
 			"duration_ms", time.Since(started).Milliseconds(),
-			"error", err.Error(),
+			"code", "search_failed",
 		)
 		return query.HintRepairEncoding(fmt.Errorf("search: %w", err))
 	}
