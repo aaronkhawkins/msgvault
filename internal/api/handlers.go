@@ -904,7 +904,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		if s.writeIfContextError(w, err) {
 			return
 		}
-		s.logger.Error("search failed", "mode", "fts", "code", "search_failed")
+		s.logger.Error("search failed", "query", searchText, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Search failed")
 		return
 	}
@@ -1001,7 +1001,7 @@ func (s *Server) handleHybridSearch(
 
 	filter, err := hybridEngine.BuildFilter(ctx, parsed, structuredFilter)
 	if err != nil {
-		s.logger.Error("build hybrid filter failed", "mode", mode, "code", "filter_resolution_failed")
+		s.logger.Error("build hybrid filter failed", "query", q, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "filter resolution failed")
 		return
 	}
@@ -1037,7 +1037,7 @@ func (s *Server) handleHybridSearch(
 		case errors.Is(err, vector.ErrIndexScopeMismatch):
 			writeError(w, http.StatusBadRequest, "index_scope_mismatch", err.Error())
 		default:
-			s.logger.Error("hybrid search failed", "mode", mode, "code", "search_failed")
+			s.logger.Error("hybrid search failed", "query", q, "mode", mode, "error", err)
 			writeError(w, http.StatusInternalServerError, "internal_error", "search failed")
 		}
 		return
@@ -1354,7 +1354,7 @@ func (s *Server) writeVectorSearchError(w http.ResponseWriter, err error, operat
 	case errors.Is(err, vector.ErrIndexScopeMismatch):
 		writeError(w, http.StatusBadRequest, "index_scope_mismatch", err.Error())
 	default:
-		s.logger.Error("vector search failed", "operation", operation, "code", "search_failed")
+		s.logger.Error("vector search failed", "operation", operation, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", operation+" failed")
 	}
 }
@@ -3693,7 +3693,7 @@ func (s *Server) handleFastSearch(w http.ResponseWriter, r *http.Request) {
 		if s.writeIfContextError(w, err) {
 			return
 		}
-		s.logger.Error("fast search failed", "mode", "fast", "code", "search_failed")
+		s.logger.Error("fast search failed", "query", queryStr, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Search failed")
 		return
 	}
@@ -3830,7 +3830,7 @@ func (s *Server) handleDeepSearch(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusServiceUnavailable, "body_search_index_unavailable", err.Error())
 			return
 		}
-		s.logger.Error("deep search failed", "mode", "deep", "code", "search_failed")
+		s.logger.Error("deep search failed", "query", queryStr, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Search failed")
 		return
 	}
@@ -4081,7 +4081,7 @@ func (s *Server) handleTextSearch(w http.ResponseWriter, r *http.Request) {
 		if s.writeIfContextError(w, err) {
 			return
 		}
-		s.logger.Error("text search failed", "mode", "text", "code", "search_failed")
+		s.logger.Error("text search failed", "query", queryStr, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "Text search failed")
 		return
 	}

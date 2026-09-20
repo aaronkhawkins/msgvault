@@ -300,13 +300,16 @@ func (e *voyageSizeError) Error() string { return e.message }
 func voyageClientError(resp *http.Response) error {
 	body, readErr := io.ReadAll(io.LimitReader(resp.Body, 4_096))
 	if readErr != nil {
-		return fmt.Errorf("embed: Voyage HTTP %d: %w", resp.StatusCode, ErrPermanent4xx)
+		return fmt.Errorf("embed: Voyage HTTP %d (read error body: %w): %w", resp.StatusCode, readErr, ErrPermanent4xx)
 	}
 	message := voyageErrorMessage(body)
 	if resp.StatusCode == http.StatusBadRequest && isVoyageSizeMessage(message) {
-		return &voyageSizeError{message: "embed: Voyage HTTP 400: request exceeds provider size limit"}
+		return &voyageSizeError{message: "embed: Voyage HTTP 400: " + message}
 	}
-	return fmt.Errorf("embed: Voyage HTTP %d: %w", resp.StatusCode, ErrPermanent4xx)
+	if message == "" {
+		return fmt.Errorf("embed: Voyage HTTP %d: %w", resp.StatusCode, ErrPermanent4xx)
+	}
+	return fmt.Errorf("embed: Voyage HTTP %d: %s: %w", resp.StatusCode, message, ErrPermanent4xx)
 }
 
 func voyageErrorMessage(body []byte) string {

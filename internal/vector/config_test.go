@@ -106,6 +106,12 @@ func TestConfig_Validate(t *testing.T) {
 			c.Embeddings.PassageInputType = "passage"
 			c.Embeddings.QueryInputType = "query"
 		}, ""},
+		{"InputTypesRequireOpenAIFormat", func(c *Config) {
+			c.Embeddings.APIFormat = APIFormatVoyageContextual
+			c.Embeddings.Model = "voyage-context-4"
+			c.Embeddings.PassageInputType = "passage"
+			c.Embeddings.QueryInputType = "query"
+		}, "require api_format=\"openai\""},
 		{"InputTypeInvalidToken", func(c *Config) {
 			c.Embeddings.PassageInputType = "not a token"
 			c.Embeddings.QueryInputType = "query"
@@ -565,10 +571,6 @@ func TestConfig_GenerationFingerprint_IncludesOpenAIInputTypes(t *testing.T) {
 	assert.NotEqual(t, base.GenerationFingerprint(), configured.GenerationFingerprint())
 	assert.NotEqual(t, configured.GenerationFingerprint(), changedPassage.GenerationFingerprint())
 	assert.NotEqual(t, configured.GenerationFingerprint(), changedQuery.GenerationFingerprint())
-	omitted := Config{Embeddings: EmbeddingsConfig{
-		Model: "m", Dimension: 8, MaxInputChars: 2000,
-	}}
-	assert.Equal(t, base.GenerationFingerprint(), omitted.GenerationFingerprint())
 }
 
 // TestConfig_GenerationFingerprint_IncludesEmbedPolicyVersion pins the

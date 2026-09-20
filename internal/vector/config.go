@@ -250,6 +250,9 @@ func (e EmbeddingsConfig) Validate() error {
 	if (e.PassageInputType == "") != (e.QueryInputType == "") {
 		return errors.New("vector.embeddings input_type policy: passage_input_type and query_input_type must be configured together")
 	}
+	if e.PassageInputType != "" && e.EffectiveAPIFormat() != APIFormatOpenAI {
+		return errors.New("vector.embeddings input_type policy: passage_input_type and query_input_type require api_format=\"openai\"")
+	}
 	for name, value := range map[string]string{
 		"passage_input_type": e.PassageInputType,
 		"query_input_type":   e.QueryInputType,
@@ -455,7 +458,8 @@ func (e EmbeddingsConfig) Fingerprint() string {
 // GenerationFingerprint returns the full identifier used to compare an
 // index generation against the configured policy. Format:
 // "<model>:<dimension>:<preprocess>:c<max_input_chars>:e<embed_policy>".
-// Non-empty document or query prefixes add a hashed ":t<digest>" segment.
+// Non-empty document/query prefixes add a hashed ":t<digest>" segment, and
+// non-empty passage/query input roles add a hashed ":i<digest>" segment.
 // Contextual generations add
 // ":avoyage-contextual:v<context_policy_version>" before any scope segment.
 // Every segment is derived from the effective config (or a code-level
@@ -505,24 +509,22 @@ func (c *Config) GenerationFingerprint() string {
 // exposing configured prefix text. Empty policy deliberately has no identity
 // so existing generation fingerprints retain their exact legacy bytes.
 func (e EmbeddingsConfig) TaskPrefixFingerprint() string {
-	if e.DocumentPrefix == "" && e.QueryPrefix == "" {
-		return ""
-	}
-	encoded := fmt.Sprintf("embedding-prefix-v1:%d:%s:%d:%s",
-		len(e.DocumentPrefix), e.DocumentPrefix, len(e.QueryPrefix), e.QueryPrefix)
-	digest := sha256.Sum256([]byte(encoded))
-	return hex.EncodeToString(digest[:])
+	return embeddingRoleFingerprint("embedding-prefix-v1", e.DocumentPrefix, e.QueryPrefix)
 }
 
 // InputTypeFingerprint identifies the optional OpenAI-compatible input role
 // policy without exposing provider-specific values in status output. An
 // omitted policy deliberately preserves legacy generation fingerprints.
 func (e EmbeddingsConfig) InputTypeFingerprint() string {
-	if e.PassageInputType == "" && e.QueryInputType == "" {
+	return embeddingRoleFingerprint("openai-input-type-v1", e.PassageInputType, e.QueryInputType)
+}
+
+func embeddingRoleFingerprint(namespace, documentValue, queryValue string) string {
+	if documentValue == "" && queryValue == "" {
 		return ""
 	}
-	encoded := fmt.Sprintf("openai-input-type-v1:%d:%s:%d:%s",
-		len(e.PassageInputType), e.PassageInputType, len(e.QueryInputType), e.QueryInputType)
+	encoded := fmt.Sprintf("%s:%d:%s:%d:%s",
+		namespace, len(documentValue), documentValue, len(queryValue), queryValue)
 	digest := sha256.Sum256([]byte(encoded))
 	return hex.EncodeToString(digest[:])
 }

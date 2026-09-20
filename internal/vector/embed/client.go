@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -251,7 +252,17 @@ func (c *Client) doOnce(ctx context.Context, body []byte, want int) ([][]float32
 		return nil, &retryError{err: fmt.Errorf("embed: HTTP %d", resp.StatusCode)}
 	}
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("embed: HTTP %d: %w", resp.StatusCode, ErrPermanent4xx)
+		body, err := io.ReadAll(io.LimitReader(resp.Body, 4096))
+		if err != nil {
+			return nil, fmt.Errorf("embed: HTTP %d (read error body: %w): %w",
+				resp.StatusCode, err, ErrPermanent4xx)
+		}
+		msg := strings.TrimSpace(string(body))
+		if msg == "" {
+			return nil, fmt.Errorf("embed: HTTP %d: %w", resp.StatusCode, ErrPermanent4xx)
+		}
+		return nil, fmt.Errorf("embed: HTTP %d: %s: %w",
+			resp.StatusCode, msg, ErrPermanent4xx)
 	}
 
 	var r embeddingResponse

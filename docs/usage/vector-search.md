@@ -218,9 +218,10 @@ Practical guidance:
 - **Self-hosted models:** match the actual context window exposed by
   your server, not just the upstream model card.
 
-If `msgvault embeddings build` logs `HTTP 400`, inspect the embedder's
-own protected logs for the cause. Msgvault deliberately retains only the
-status classification so provider response text cannot leak message content.
+If `msgvault embeddings build` logs `HTTP 400`, msgvault now includes
+the response body from the embedder when available. Check both the
+CLI log and the embedder's own logs. `the input length exceeds the
+context length` confirms you need to lower `max_input_chars`.
 
 ## Initial Embedding
 
@@ -528,12 +529,13 @@ body keywords.
 | `invalid_mode` | The requested mode is not supported by that surface. | Use `fts`, `vector`, or `hybrid` on the CLI or HTTP; use `vector`, `hybrid`, or omitted `mode` in MCP. |
 | `embedding_timeout` | The embedding endpoint did not respond before the request deadline (transient: slow/cold model, network blip). | Retry; if persistent, raise `[vector.embeddings].timeout` or use a faster endpoint. |
 
-For non-429 HTTP 4xx errors, msgvault treats the response as permanent and
-retains only the HTTP status. If a batch contains both good and bad rows, the worker
+For non-429 HTTP 4xx errors, msgvault treats the response as
+permanent and includes up to the first few KiB of the response body in
+the error. If a batch contains both good and bad rows, the worker
 downshifts to smaller batches and then single-message requests so
 valid messages can still be embedded while the failing row is dropped
-or reported. When the provider reports an input-length error in its own
-protected logs, lower
+or reported. If the body says `the input length exceeds the context
+length` (Ollama) or an equivalent token-limit error, lower
 `max_input_chars` to match the model's context window. See the sizing
 guidance above.
 

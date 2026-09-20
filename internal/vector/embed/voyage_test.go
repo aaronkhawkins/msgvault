@@ -944,11 +944,6 @@ func TestVoyageClient_AuthAndParameter4xxFailFast(t *testing.T) {
 
 			require.Error(t, err)
 			require.NotErrorIs(t, err, embed.ErrDocumentTooLarge)
-			for _, sensitive := range []string{
-				"invalid API key", "forbidden IP", "model must be", "output_dimension",
-			} {
-				assert.NotContains(t, err.Error(), sensitive)
-			}
 			assert.Equal(t, int32(1), attempts.Load())
 		})
 	}
