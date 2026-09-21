@@ -2180,3 +2180,20 @@ func (l ListPersonRelationshipReviewsQueryStatus) Validate() error {
 		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid ListPersonRelationshipReviewsQueryStatus value, got: %v", l))
 	}
 }
+
+type SearchMessagesQuerySort string
+
+const (
+	Newest    SearchMessagesQuerySort = "newest"
+	Relevance SearchMessagesQuerySort = "relevance"
+)
+
+// Validate checks if the SearchMessagesQuerySort value is valid
+func (s SearchMessagesQuerySort) Validate() error {
+	switch s {
+	case Newest, Relevance:
+		return nil
+	default:
+		return runtime.NewValidationErrorsFromString("Enum", fmt.Sprintf("must be a valid SearchMessagesQuerySort value, got: %v", s))
+	}
+}

@@ -754,10 +754,9 @@ func (s *Store) searchMessagesQueryImpl(
 	}
 
 	// Results query.
-	orderBy := "COALESCE(m.sent_at, m.received_at, m.internal_date) DESC, m.id DESC"
-	if ftsEnabled {
-		orderBy = ftsOrder + ", " + orderBy
-	}
+	orderBy, orderArgCount := messageSearchOrderBy(
+		q.ResultSort, ftsEnabled, ftsOrder, ftsOrderArgCount,
+	)
 	searchSQL := fmt.Sprintf(`
 		SELECT
 			m.id,
@@ -789,9 +788,9 @@ func (s *Store) searchMessagesQueryImpl(
 	// If the dialect's order-by fragment has ? placeholders, bind the FTS
 	// expression that many extra times — right after the WHERE args and
 	// before LIMIT/OFFSET so Rebind assigns them the correct positions.
-	resultArgs := make([]any, 0, len(args)+ftsOrderArgCount+2)
+	resultArgs := make([]any, 0, len(args)+orderArgCount+2)
 	resultArgs = append(resultArgs, args...)
-	for range ftsOrderArgCount {
+	for range orderArgCount {
 		resultArgs = append(resultArgs, ftsExpr)
 	}
 	resultArgs = append(resultArgs, limit, offset)
@@ -819,6 +818,19 @@ func (s *Store) searchMessagesQueryImpl(
 	}
 
 	return messages, total, nil
+}
+
+func messageSearchOrderBy(
+	resultSort search.ResultSort,
+	ftsEnabled bool,
+	ftsOrder string,
+	ftsOrderArgCount int,
+) (string, int) {
+	newest := "COALESCE(m.sent_at, m.received_at, m.internal_date) DESC, m.id DESC"
+	if !ftsEnabled || resultSort == search.ResultSortNewest {
+		return newest, 0
+	}
+	return ftsOrder + ", " + newest, ftsOrderArgCount
 }
 
 // searchMessagesQueryNoFTS retries the query with the LIKE-based text

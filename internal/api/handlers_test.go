@@ -4212,6 +4212,49 @@ func TestHandleSearch(t *testing.T) {
 	assert.Equal(t, "Test", resp.Query, "query")
 }
 
+func TestHandleSearchNewestSortReachesStructuredStoreQuery(t *testing.T) {
+	srv, st := newTestServerWithMockStore(t)
+
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/search?q=Test&sort=newest", nil)
+	w := httptest.NewRecorder()
+	srv.Router().ServeHTTP(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code, "status (body: %s)", w.Body.String())
+	require.NotNil(t, st.searchMessagesQueryLast, "structured query")
+	assert.Equal(t, search.ResultSortNewest, st.searchMessagesQueryLast.ResultSort)
+}
+
+func TestHandleSearchRejectsInvalidOrUnsupportedSort(t *testing.T) {
+	tests := []struct {
+		name      string
+		target    string
+		wantError string
+	}{
+		{"invalid", "/api/v1/search?q=Test&sort=oldest", "invalid_sort"},
+		{"vector_newest", "/api/v1/search?q=Test&mode=vector&sort=newest", "unsupported_sort_mode"},
+		{"hybrid_newest", "/api/v1/search?q=Test&mode=hybrid&sort=newest", "unsupported_sort_mode"},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			requirements := require.New(t)
+			assertions := assert.New(t)
+			srv, st := newTestServerWithMockStore(t)
+			request := httptest.NewRequest(http.MethodGet, tc.target, nil)
+			response := httptest.NewRecorder()
+
+			srv.Router().ServeHTTP(response, request)
+
+			requirements.Equal(http.StatusBadRequest, response.Code, "status (body: %s)", response.Body.String())
+			var envelope ErrorResponse
+			requirements.NoError(json.NewDecoder(response.Body).Decode(&envelope), "decode error")
+			assertions.Equal(tc.wantError, envelope.Error)
+			assertions.Equal(int32(0), st.searchMessagesCalls.Load(), "raw search calls")
+			assertions.Equal(int32(0), st.searchMessagesQueryCalls.Load(), "structured search calls")
+		})
+	}
+}
+
 // TestHandleSearchListIDUsesStructuredStoreQuery catches list-only HTTP
 // searches being routed through the raw full-text path instead of the Store
 // predicate that owns List-Id matching.

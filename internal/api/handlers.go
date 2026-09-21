@@ -743,6 +743,16 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	if mode == "" {
 		mode = "fts"
 	}
+	sortValue := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("sort")))
+	switch sortValue {
+	case "", string(search.ResultSortRelevance):
+		sortValue = string(search.ResultSortRelevance)
+	case string(search.ResultSortNewest):
+	default:
+		writeError(w, http.StatusBadRequest, "invalid_sort",
+			"Query parameter 'sort' must be 'relevance' or 'newest'")
+		return
+	}
 	explain := false
 	if rawExplain := r.URL.Query().Get("explain"); rawExplain != "" {
 		var err error
@@ -759,6 +769,7 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	parsedQuery.HideDeleted = true
+	parsedQuery.ResultSort = search.ResultSort(sortValue)
 
 	account := r.URL.Query().Get("account")
 	collection := r.URL.Query().Get("collection")
@@ -784,6 +795,11 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if mode == "vector" || mode == exploreSearchModeHybrid {
+		if parsedQuery.ResultSort == search.ResultSortNewest {
+			writeError(w, http.StatusBadRequest, "unsupported_sort_mode",
+				"sort=newest is only supported when mode=fts")
+			return
+		}
 		structuredFilter, err := parseMessageFilter(requestWithoutParams(r, "message_type", "offset"))
 		if err != nil {
 			s.rejectBadParam(w, err)
@@ -888,7 +904,8 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		messages []store.APIMessage
 		total    int64
 	)
-	useQuery := parsedQuery.HasOperators() || len(parsedQuery.AccountIDs) > 0
+	useQuery := parsedQuery.HasOperators() || len(parsedQuery.AccountIDs) > 0 ||
+		parsedQuery.ResultSort == search.ResultSortNewest
 	if searcher, ok := s.store.(ctxMessageSearcher); ok {
 		if useQuery {
 			messages, total, err = searcher.SearchMessagesQueryContext(r.Context(), parsedQuery, offset, pageSize)

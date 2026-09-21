@@ -16,6 +16,7 @@ import (
 	"go.kenn.io/kit/daemon"
 	"go.kenn.io/msgvault/internal/deletion"
 	"go.kenn.io/msgvault/internal/query"
+	"go.kenn.io/msgvault/internal/search"
 	"go.kenn.io/msgvault/internal/vector/visual"
 )
 
@@ -818,9 +819,14 @@ func rawRouteParameters(operationID string) []*huma.Param {
 			queryStringParam("cid", "Inline MIME Content-ID", true),
 		}
 	case "searchMessages":
+		sortParam := queryStringParam("sort", "Result order: relevance (default) or newest; newest is supported only for FTS", false)
+		sortParam.Schema.Enum = stringsToAny([]string{
+			string(search.ResultSortRelevance), string(search.ResultSortNewest),
+		})
 		return mergeParams([]*huma.Param{
 			queryStringParam("q", "Search query", true),
 			queryStringParam("mode", "Search mode: fts, vector, or hybrid. conversation_id applies in every mode; other structured filter parameters require vector or hybrid", false),
+			sortParam,
 			queryIntegerParam("page", "One-based page number (default 1; values below 1 are clamped to 1). Non-numeric values are rejected with 400."),
 			queryIntegerParam("page_size", "Page size (default 20, max 100; out-of-range values are clamped). Non-numeric values are rejected with 400."),
 			queryIntegerParam("offset", "Zero-based ranking offset for vector or hybrid search (default 0)"),

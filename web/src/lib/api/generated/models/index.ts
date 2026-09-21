@@ -634,6 +634,7 @@ export * from "./searchFastResponse";
 export * from "./searchIntegrationTasksParams";
 export * from "./searchMessagesByDomainsParams";
 export * from "./searchMessagesParams";
+export * from "./searchMessagesSort";
 export * from "./searchParticipantFilesPathParameters";
 export * from "./searchPersonFilesPathParameters";
 export * from "./searchProvenance";

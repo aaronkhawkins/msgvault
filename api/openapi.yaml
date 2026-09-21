@@ -11850,7 +11850,7 @@ components:
       type: apiKey
 info:
   title: msgvault API
-  version: 2.17.0
+  version: 2.18.0
 openapi: 3.1.0
 paths:
   /api/ping:
@@ -22716,6 +22716,14 @@ paths:
           in: query
           name: mode
           schema:
+            type: string
+        - description: "Result order: relevance (default) or newest; newest is supported only for FTS"
+          in: query
+          name: sort
+          schema:
+            enum:
+              - relevance
+              - newest
             type: string
         - description: One-based page number (default 1; values below 1 are clamped to 1). Non-numeric values are rejected with 400.
           in: query
