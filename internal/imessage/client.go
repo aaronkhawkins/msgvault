@@ -442,6 +442,13 @@ func (c *Client) importMessage(
 	if err := s.LinkMessageLabel(msgID, labelID); err != nil {
 		return fmt.Errorf("link label: %w", err)
 	}
+	indexed, err := s.GetMessageContext(ctx, msgID)
+	if err != nil {
+		return fmt.Errorf("load indexed message: %w", err)
+	}
+	if err := s.UpsertFTS(msgID, indexed.Subject, indexed.BodyText, indexed.From, strings.Join(indexed.To, " "), strings.Join(indexed.Cc, " ")); err != nil {
+		return fmt.Errorf("upsert fts: %w", err)
+	}
 
 	// Warn about attachments
 	if msg.HasAttachments != 0 {
