@@ -272,7 +272,10 @@ import (
 // closed when an older daemon ignores an additive source scope instead of
 // widening the result to all sources. Text search also accepts source_id
 // and confirms it with applied_source_id.
-const APISchemaVersion = "2.17.0"
+// 2.18.0 adds sort=relevance|newest to GET /api/v1/search. Relevance remains
+// the default; newest is FTS-only and orders by source timestamp descending
+// with message ID descending as the stable tie-breaker.
+const APISchemaVersion = "2.18.0"
 
 // OpenAPIDocument builds the API schema from the same Huma route registration
 // used by the daemon. It binds no socket and needs no database.

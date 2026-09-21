@@ -176,8 +176,9 @@ func TestClient_AppliesOpenAIInputTypeByRole(t *testing.T) {
 
 func TestClient_OmitsOpenAIInputTypeWhenUnconfigured(t *testing.T) {
 	var raw map[string]json.RawMessage
+	decodeErr := make(chan error, 1)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		require.NoError(t, json.NewDecoder(r.Body).Decode(&raw))
+		decodeErr <- json.NewDecoder(r.Body).Decode(&raw)
 		writeEmbeddings(t, w, [][]float32{{1}})
 	}))
 	t.Cleanup(server.Close)
@@ -185,6 +186,7 @@ func TestClient_OmitsOpenAIInputTypeWhenUnconfigured(t *testing.T) {
 	client := NewClient(Config{Endpoint: server.URL, Model: "test-model", Dimension: 1})
 	_, err := client.EmbedQuery(t.Context(), "find this")
 	require.NoError(t, err)
+	require.NoError(t, <-decodeErr)
 	assert.NotContains(t, raw, "input_type")
 }
 

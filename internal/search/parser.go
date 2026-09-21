@@ -29,6 +29,7 @@ type Query struct {
 	ConversationIDs []int64    // conversation_id: local conversation filter
 	MessageTypes    []string   // message_type filter (e.g. sms, mms, whatsapp, teams)
 	HideDeleted     bool       // exclude messages where deleted_from_source_at IS NOT NULL
+	ResultSort      ResultSort // result ordering selected by the calling front door
 
 	// ListIDExactGroups carries structured exact List-Id filters. Values in
 	// each group are OR'd; groups are AND'd. The parser never populates it.
@@ -58,6 +59,15 @@ type Query struct {
 	// Err before searching.
 	parseErrs []error
 }
+
+// ResultSort selects the ordering for message search results. The zero value
+// preserves the historical relevance-first behavior.
+type ResultSort string
+
+const (
+	ResultSortRelevance ResultSort = "relevance"
+	ResultSortNewest    ResultSort = "newest"
+)
 
 // DeletionScope selects which messages a search covers relative to
 // upstream deletion (messages.deleted_from_source_at). Dedup-hidden rows

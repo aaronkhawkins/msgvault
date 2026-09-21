@@ -949,6 +949,9 @@ type SearchMessagesQuery struct {
 	// Mode Search mode: fts, vector, or hybrid. conversation_id applies in every mode; other structured filter parameters require vector or hybrid
 	Mode *string `json:"mode,omitempty"`
 
+	// Sort Result order: relevance (default) or newest; newest is supported only for FTS
+	Sort *SearchMessagesQuerySort `json:"sort,omitempty"`
+
 	// Page One-based page number (default 1; values below 1 are clamped to 1). Non-numeric values are rejected with 400.
 	Page *int64 `json:"page,omitempty"`
 
@@ -1014,7 +1017,21 @@ type SearchMessagesQuery struct {
 }
 
 func (s SearchMessagesQuery) Validate() error {
-	return runtime.ConvertValidatorError(typesValidator.Struct(s))
+	var errors runtime.ValidationErrors
+	if err := typesValidator.Var(s.Q, "required"); err != nil {
+		errors = errors.Append("Q", err)
+	}
+	if s.Sort != nil {
+		if v, ok := any(s.Sort).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append("Sort", err)
+			}
+		}
+	}
+	if len(errors) == 0 {
+		return nil
+	}
+	return errors
 }
 
 type DeepSearchQuery struct {

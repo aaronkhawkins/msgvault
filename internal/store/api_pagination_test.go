@@ -47,7 +47,7 @@ func TestStoreAPI_PaginationStability_IdenticalSentAt(t *testing.T) {
 			ConversationID:  convID,
 			SourceID:        src.ID,
 			SourceMessageID: fmt.Sprintf("api-page-msg-%d", i),
-			MessageType:     "email",
+			MessageType:     store.MessageTypeEmail,
 			SentAt:          sql.NullTime{Time: sameTime, Valid: true},
 			Subject:         sql.NullString{String: subjectTag + " " + strconv.Itoa(i), Valid: true},
 			Snippet:         sql.NullString{String: "snippet", Valid: true},
@@ -88,6 +88,46 @@ func TestStoreAPI_PaginationStability_IdenticalSentAt(t *testing.T) {
 		})
 		assertStorePagesDisjointComplete(t, wantIDs, seen)
 	})
+}
+
+func TestStoreAPI_SearchMessagesNewestUsesTimestampAndStableIDTieBreak(t *testing.T) {
+	require := require.New(t)
+	assertions := assert.New(t)
+	st := testutil.NewTestStore(t)
+	source, err := st.GetOrCreateSource("gmail", "newest-sort@example.com")
+	require.NoError(err, "GetOrCreateSource")
+	conversationID, err := st.EnsureConversation(source.ID, "newest-sort-thread", "Newest sort")
+	require.NoError(err, "EnsureConversation")
+
+	insert := func(sourceID string, sentAt time.Time, subject string) int64 {
+		messageID, err := st.UpsertMessage(&store.Message{
+			ConversationID:  conversationID,
+			SourceID:        source.ID,
+			SourceMessageID: sourceID,
+			MessageType:     store.MessageTypeEmail,
+			SentAt:          sql.NullTime{Time: sentAt, Valid: true},
+			Subject:         sql.NullString{String: subject, Valid: true},
+			Snippet:         sql.NullString{String: "synthetic", Valid: true},
+		})
+		require.NoError(err, "UpsertMessage(%s)", sourceID)
+		require.NoError(st.UpsertFTS(messageID, subject, "", "sender@example.com", "", ""),
+			"UpsertFTS(%s)", sourceID)
+		return messageID
+	}
+
+	oldID := insert("old", time.Date(2024, 1, 1, 0, 0, 0, 0, time.UTC), "newestsorttoken")
+	tieTime := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	firstTieID := insert("new-tie-one", tieTime, "newestsorttoken")
+	secondTieID := insert("new-tie-two", tieTime, "newestsorttoken")
+
+	newest, total, err := st.SearchMessagesQuery(&search.Query{
+		TextTerms: []string{"newestsorttoken"}, ResultSort: search.ResultSortNewest,
+	}, 0, 10)
+	require.NoError(err, "newest search")
+	assertions.Equal(int64(3), total, "total")
+	require.Len(newest, 3, "newest results")
+	assertions.Equal([]int64{secondTieID, firstTieID, oldID},
+		[]int64{newest[0].ID, newest[1].ID, newest[2].ID}, "newest order")
 }
 
 // pageStoreOneByOne walks offsets 0..n-1 with limit=1, collecting the single id
