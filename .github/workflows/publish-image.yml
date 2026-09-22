@@ -34,7 +34,7 @@ jobs:
           push: true
           tags: |
             ghcr.io/aaronkhawkins/msgvault:${{ github.sha }}
-            ghcr.io/aaronkhawkins/msgvault:main
+            ${{ github.ref == 'refs/heads/main' && 'ghcr.io/aaronkhawkins/msgvault:main' || '' }}
           build-args: |
             VERSION=main
             COMMIT=${{ github.sha }}
