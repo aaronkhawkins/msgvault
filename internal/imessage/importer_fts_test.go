@@ -46,7 +46,7 @@ func TestImportIndexesMessagesAndRecipients(t *testing.T) {
 	require.NoError(t, err)
 	defer func() { assert.NoError(t, client.Close()) }()
 
-	for run := 0; run < 2; run++ {
+	for range 2 {
 		summary, err := client.Import(context.Background(), st, source.ID)
 		require.NoError(t, err)
 		assert.Equal(t, 2, summary.MessagesImported)
@@ -56,6 +56,7 @@ func TestImportIndexesMessagesAndRecipients(t *testing.T) {
 	rows, err := st.DB().Query(`SELECT m.source_message_id, f.body, f.from_addr, f.to_addr
 		FROM messages_fts f JOIN messages m ON m.id = f.message_id ORDER BY m.source_message_id`)
 	require.NoError(t, err)
+	defer func() { assert.NoError(t, rows.Close()) }()
 	var indexed []struct{ id, body, from, to string }
 	for rows.Next() {
 		var row struct{ id, body, from, to string }
@@ -63,7 +64,6 @@ func TestImportIndexesMessagesAndRecipients(t *testing.T) {
 		indexed = append(indexed, row)
 	}
 	require.NoError(t, rows.Err())
-	require.NoError(t, rows.Close())
 	assert.Equal(t, []struct{ id, body, from, to string }{
 		{"1", "inboundtoken", "alice@example.com", "owner@example.com"},
 		{"2", "outboundtoken", "owner@example.com", "alice@example.com +15551234567"},
