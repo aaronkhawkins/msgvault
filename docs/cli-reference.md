@@ -1750,6 +1750,8 @@ Continue embedding work and finish the current generation. If a generation match
 
 `--defer-failed-batches` keeps a failing forward batch unstamped and proceeds to later messages. A full backstop pass (`--backstop`) ignores the forward cursor and retries deferred messages; the generation cannot activate while they remain pending. Use the normal mode without deferral for that recovery pass.
 
+`--retry-deferred` takes a snapshot of the current forward cursor and retries only still-pending messages below it, one at a time. A singleton that still fails remains pending, while successful neighbors are stamped. The forward cursor and the configured batch size are unchanged. Run it separately from `--backstop`, then resume the ordinary forward pass.
+
 ### embeddings list
 
 ```bash

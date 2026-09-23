@@ -67,8 +67,12 @@ type WorkerDeps struct {
 	BuildScope    vector.BuildScope
 	MaxInputChars int
 	BatchSize     int
+	// MaxMessageID bounds a one-off scan to a captured forward watermark.
+	// Zero leaves scans unbounded.
+	MaxMessageID int64
 	// DeferFailedBatches lets a forward pass leave a failed batch unstamped
-	// and continue after it. The backstop always retries deferred rows.
+	// and continue after it. An ordinary backstop still retries failures;
+	// a bounded backstop can defer failed singletons within its snapshot.
 	// Consecutive failures still abort so an unavailable endpoint cannot
 	// sweep the entire corpus.
 	DeferFailedBatches bool
@@ -360,15 +364,15 @@ func (w *Worker) run(ctx context.Context, gen vector.GenerationID, backstop bool
 			}
 			consecutiveFailures++
 			lastErr = err
-			if w.deps.DeferFailedBatches && !backstop {
+			if w.deps.DeferFailedBatches && (!backstop || w.deps.MaxMessageID > 0) {
 				res.Failed += len(ids)
 				if consecutiveFailures >= w.deps.MaxConsecutiveFailures {
 					return res, fmt.Errorf("embed worker aborting after %d consecutive failures: %w",
 						consecutiveFailures, lastErr)
 				}
-				w.deps.Log.Warn("embed: deferring failed batch for backstop", "gen", gen, "ids", len(ids), "error", err)
+				w.deps.Log.Warn("embed: leaving failed batch pending", "gen", gen, "ids", len(ids), "error", err)
 				afterID = batchMax
-				w.advanceWatermark(ctx, gen, batchMax, false)
+				w.advanceWatermark(ctx, gen, batchMax, backstop)
 				continue
 			}
 
@@ -614,17 +618,32 @@ func (w *Worker) run(ctx context.Context, gen vector.GenerationID, backstop bool
 }
 
 func (w *Worker) scanForEmbedding(ctx context.Context, gen int64, afterID int64) ([]int64, error) {
+	if w.deps.MaxMessageID > 0 && afterID >= w.deps.MaxMessageID {
+		return nil, nil
+	}
 	scope := vector.NewBuildScope(w.deps.BuildScope.MessageTypes, w.deps.BuildScope.SourceIDs)
+	var ids []int64
+	var err error
 	if scope.IsEmpty() {
-		return w.deps.Store.ScanForEmbedding(ctx, gen, afterID, w.deps.BatchSize)
+		ids, err = w.deps.Store.ScanForEmbedding(ctx, gen, afterID, w.deps.BatchSize)
+	} else {
+		scoped, ok := w.deps.Store.(interface {
+			ScanForEmbeddingScoped(ctx context.Context, target int64, afterID int64, limit int, messageTypes []string, sourceIDs []int64) ([]int64, error)
+		})
+		if !ok {
+			return nil, errors.New("work store does not support scoped embedding scans")
+		}
+		ids, err = scoped.ScanForEmbeddingScoped(ctx, gen, afterID, w.deps.BatchSize, scope.MessageTypes, scope.SourceIDs)
 	}
-	scoped, ok := w.deps.Store.(interface {
-		ScanForEmbeddingScoped(ctx context.Context, target int64, afterID int64, limit int, messageTypes []string, sourceIDs []int64) ([]int64, error)
-	})
-	if !ok {
-		return nil, errors.New("work store does not support scoped embedding scans")
+	if err != nil || w.deps.MaxMessageID == 0 {
+		return ids, err
 	}
-	return scoped.ScanForEmbeddingScoped(ctx, gen, afterID, w.deps.BatchSize, scope.MessageTypes, scope.SourceIDs)
+	for i, id := range ids {
+		if id > w.deps.MaxMessageID {
+			return ids[:i], nil
+		}
+	}
+	return ids, nil
 }
 
 // advanceWatermark persists the per-gen forward-scan cursor to id after a
