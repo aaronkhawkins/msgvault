@@ -123,6 +123,22 @@ func runEmbed(cmd *cobra.Command) error {
 	if err != nil {
 		return err
 	}
+	var retryMaxID int64
+	if embedRetryDeferred {
+		if embedBackstop {
+			return errors.New("--retry-deferred and --backstop cannot be combined")
+		}
+		if cfg.Vector.Embeddings.EffectiveAPIFormat() != vector.APIFormatOpenAI {
+			return errors.New("--retry-deferred requires OpenAI-format embeddings")
+		}
+		retryMaxID, err = embed.NewWatermark(vectorsDB, rebind).GetWatermark(ctx, gen)
+		if err != nil {
+			return fmt.Errorf("read forward embedding cursor: %w", err)
+		}
+		if retryMaxID == 0 {
+			return errors.New("no forward embedding cursor to retry behind")
+		}
+	}
 
 	// "Pending" is now the count of live messages still needing work for
 	// this generation (embed_gen <> gen), read from the main DB coverage
@@ -168,7 +184,8 @@ func runEmbed(cmd *cobra.Command) error {
 		Rebind: rebind, LastModifiedExpr: lastModifiedExpr,
 		TotalPending:       totalPending,
 		Progress:           newProgressPrinter(errOut, totalPending, cfg.Vector.Embeddings.ETAWindow),
-		DeferFailedBatches: embedDeferFailedBatches,
+		DeferFailedBatches: embedDeferFailedBatches || embedRetryDeferred,
+		RetryMaxMessageID:  retryMaxID,
 		PersonGate:         personGate,
 		APIKey:             embeddingAPIKey,
 	})
@@ -176,7 +193,7 @@ func runEmbed(cmd *cobra.Command) error {
 		return fmt.Errorf("configure embedding runtime: %w", err)
 	}
 
-	res, err := runEmbeddingPasses(ctx, runtime.Runner, gen, embedBackstop,
+	res, err := runEmbeddingPasses(ctx, runtime.Runner, gen, embedBackstop || embedRetryDeferred,
 		cfg.Vector.Embeddings.EffectiveAPIFormat(), errOut)
 	if err != nil {
 		return fmt.Errorf("embed run: %w", err)

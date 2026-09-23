@@ -13,6 +13,7 @@ var (
 	embedYes                    bool
 	embedBackstop               bool
 	embedDeferFailedBatches     bool
+	embedRetryDeferred          bool
 	embedAccounts               []string
 	embedCollections            []string
 	embeddingsRetireYes         bool
@@ -163,6 +164,8 @@ func init() {
 		"Full-scan pass that ignores the per-generation watermark, catching any straggler messages the incremental scan skipped (idempotent)")
 	embeddingsResumeCmd.Flags().BoolVar(&embedDeferFailedBatches, "defer-failed-batches", false,
 		"Leave failed message batches pending and continue; consecutive failures still stop the run")
+	embeddingsResumeCmd.Flags().BoolVar(&embedRetryDeferred, "retry-deferred", false,
+		"Retry pending messages below the current forward cursor one at a time; leave individual failures pending")
 	embeddingsResumeCmd.Flags().StringArrayVar(&embedAccounts, "account", nil,
 		"Limit embedding to this account (repeatable); overrides [vector.embed.scope] accounts for this run")
 	embeddingsResumeCmd.Flags().StringArrayVar(&embedCollections, "collection", nil,

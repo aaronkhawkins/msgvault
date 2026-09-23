@@ -237,6 +237,30 @@ func TestWorker_DeferFailedBatchDoesNotStampPermanentError(t *testing.T) {
 		"permanent errors remain pending in defer mode")
 }
 
+func TestWorker_RetryDeferredSingletonsStopsAtSnapshotCursor(t *testing.T) {
+	f := newWorkerFixture(t, 6)
+	require.NoError(t, NewWatermark(f.VectorsDB, nil).SetWatermark(t.Context(), f.BuildingGen, 4))
+	f.FakeClient.OnEmbed = func(inputs []string) ([][]float32, error) {
+		if strings.Contains(inputs[0], "body 1") {
+			return nil, fmt.Errorf("simulated oversized input: %w", ErrPermanent4xx)
+		}
+		return [][]float32{{1, 0, 0, 0}}, nil
+	}
+	w := NewWorker(WorkerDeps{
+		Backend: f.Backend, VectorsDB: f.VectorsDB, MainDB: f.MainDB,
+		Store: f.Store, Client: f.FakeClient, BatchSize: 1,
+		DeferFailedBatches: true, MaxMessageID: 4,
+	})
+	res, err := w.RunBackstop(t.Context(), f.BuildingGen)
+	require.NoError(t, err)
+	assert.Equal(t, 3, res.Succeeded)
+	assert.Equal(t, 1, res.Failed)
+	assert.Equal(t, 3, countMissing(t, f.MainDB, int64(f.BuildingGen)),
+		"failed singleton and above-cursor messages remain pending")
+	assert.Equal(t, int64(4), readWatermark(t, f.VectorsDB, int64(f.BuildingGen)),
+		"bounded backstop must not change the forward cursor")
+}
+
 func TestWorker_YieldCancellationDuringUpsertStopsCleanly(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)

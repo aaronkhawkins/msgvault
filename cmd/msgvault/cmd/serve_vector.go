@@ -51,6 +51,7 @@ type embeddingRuntimeDeps struct {
 	TotalPending       int
 	Progress           func(embed.ProgressReport)
 	DeferFailedBatches bool
+	RetryMaxMessageID  int64
 	Log                *slog.Logger
 	PersonGate         vector.SemanticPersonEmbeddingGate
 	DocumentGate       embed.BeforeRequestFunc
@@ -271,12 +272,17 @@ func newEmbeddingRuntime(vectorCfg vector.Config, deps embeddingRuntimeDeps) (*e
 		queryClient := embed.NewClient(queryClientConfig)
 		clientConfig.BeforeRequest = personGate.Check
 		personClient := embed.NewClient(clientConfig)
+		batchSize := vectorCfg.Embeddings.BatchSize
+		if deps.RetryMaxMessageID > 0 {
+			batchSize = 1
+		}
 		messageWorker := embed.NewWorker(embed.WorkerDeps{
 			Backend: deps.Backend, VectorsDB: deps.VectorsDB, MainDB: deps.MainDB,
 			Store: deps.Store, Client: messageClient, Preprocess: embeddingPreprocessConfig(vectorCfg),
 			MaxInputChars: vectorCfg.Embeddings.MaxInputChars,
-			BatchSize:     vectorCfg.Embeddings.BatchSize, BuildScope: vectorCfg.Embed.Scope.BuildScope(),
+			BatchSize:     batchSize, BuildScope: vectorCfg.Embed.Scope.BuildScope(),
 			DeferFailedBatches: deps.DeferFailedBatches,
+			MaxMessageID:       deps.RetryMaxMessageID,
 			Rebind:             deps.Rebind, LastModifiedExpr: deps.LastModifiedExpr,
 			TotalPending: deps.TotalPending, Progress: deps.Progress, Log: deps.Log,
 		})
