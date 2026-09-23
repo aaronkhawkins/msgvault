@@ -360,6 +360,17 @@ func (w *Worker) run(ctx context.Context, gen vector.GenerationID, backstop bool
 			}
 			consecutiveFailures++
 			lastErr = err
+			if w.deps.DeferFailedBatches && !backstop {
+				res.Failed += len(ids)
+				if consecutiveFailures >= w.deps.MaxConsecutiveFailures {
+					return res, fmt.Errorf("embed worker aborting after %d consecutive failures: %w",
+						consecutiveFailures, lastErr)
+				}
+				w.deps.Log.Warn("embed: deferring failed batch for backstop", "gen", gen, "ids", len(ids), "error", err)
+				afterID = batchMax
+				w.advanceWatermark(ctx, gen, batchMax, false)
+				continue
+			}
 
 			if errors.Is(err, ErrPermanent4xx) {
 				// Walk the scanned ids one at a time. Drain decides per-ID
@@ -436,19 +447,14 @@ func (w *Worker) run(ctx context.Context, gen vector.GenerationID, backstop bool
 				continue
 			}
 
-			// Non-4xx error: leave the batch unstamped. An opt-in forward
-			// pass can move past it for later backstop recovery, but must
-			// stop on consecutive failures rather than sweeping an outage.
+			// Non-4xx error: leave the batch unstamped (next scan re-finds
+			// it) and do not advance the cursor, so the failure cap can
+			// short-circuit the loop on a persistent fault.
 			w.deps.Log.Warn("embed batch failed", "gen", gen, "ids", len(ids), "error", err)
 			res.Failed += len(ids)
 			if consecutiveFailures >= w.deps.MaxConsecutiveFailures {
 				return res, fmt.Errorf("embed worker aborting after %d consecutive failures: %w",
 					consecutiveFailures, lastErr)
-			}
-			if w.deps.DeferFailedBatches && !backstop {
-				w.deps.Log.Warn("embed: deferring failed batch for backstop", "gen", gen, "ids", len(ids))
-				afterID = batchMax
-				w.advanceWatermark(ctx, gen, batchMax, false)
 			}
 			continue
 		}

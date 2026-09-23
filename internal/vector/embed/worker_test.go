@@ -213,6 +213,30 @@ func TestWorker_DeferFailedBatchStopsOnConsecutiveFailureCap(t *testing.T) {
 	assert.Equal(t, 8, countMissing(t, f.MainDB, int64(f.BuildingGen)))
 }
 
+func TestWorker_DeferFailedBatchDoesNotStampPermanentError(t *testing.T) {
+	f := newWorkerFixture(t, 4)
+	f.FakeClient.OnEmbed = func(inputs []string) ([][]float32, error) {
+		if strings.Contains(strings.Join(inputs, " "), "body 1") {
+			return nil, fmt.Errorf("simulated input rejection: %w", ErrPermanent4xx)
+		}
+		vectors := make([][]float32, len(inputs))
+		for i := range vectors {
+			vectors[i] = []float32{1, 0, 0, 0}
+		}
+		return vectors, nil
+	}
+	w := NewWorker(WorkerDeps{
+		Backend: f.Backend, VectorsDB: f.VectorsDB, MainDB: f.MainDB,
+		Store: f.Store, Client: f.FakeClient, BatchSize: 2,
+		DeferFailedBatches: true,
+	})
+	res, err := w.RunOnce(context.Background(), f.BuildingGen)
+	require.NoError(t, err)
+	assert.Equal(t, 2, res.Succeeded)
+	assert.Equal(t, 2, countMissing(t, f.MainDB, int64(f.BuildingGen)),
+		"permanent errors remain pending in defer mode")
+}
+
 func TestWorker_YieldCancellationDuringUpsertStopsCleanly(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
