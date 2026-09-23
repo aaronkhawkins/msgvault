@@ -12,6 +12,7 @@ var (
 	embedFullRebuild            bool
 	embedYes                    bool
 	embedBackstop               bool
+	embedDeferFailedBatches     bool
 	embedAccounts               []string
 	embedCollections            []string
 	embeddingsRetireYes         bool
@@ -84,6 +85,8 @@ to point at a running OpenAI-compatible endpoint.`,
 	cmd.Flags().BoolVar(&embedYes, "yes", false, "Skip confirmation prompts")
 	cmd.Flags().BoolVar(&embedBackstop, "backstop", false,
 		"Full-scan pass that ignores the per-generation watermark, catching any straggler messages the incremental scan skipped (idempotent)")
+	cmd.Flags().BoolVar(&embedDeferFailedBatches, "defer-failed-batches", false,
+		"Leave failed message batches pending and continue; consecutive failures still stop the run")
 	cmd.Flags().StringArrayVar(&embedAccounts, "account", nil,
 		"Limit embedding to this account (repeatable); overrides [vector.embed.scope] accounts for this run")
 	cmd.Flags().StringArrayVar(&embedCollections, "collection", nil,
@@ -158,6 +161,8 @@ func init() {
 	embedCmd.Deprecated = "use 'msgvault embeddings build' instead"
 	embeddingsResumeCmd.Flags().BoolVar(&embedBackstop, "backstop", false,
 		"Full-scan pass that ignores the per-generation watermark, catching any straggler messages the incremental scan skipped (idempotent)")
+	embeddingsResumeCmd.Flags().BoolVar(&embedDeferFailedBatches, "defer-failed-batches", false,
+		"Leave failed message batches pending and continue; consecutive failures still stop the run")
 	embeddingsResumeCmd.Flags().StringArrayVar(&embedAccounts, "account", nil,
 		"Limit embedding to this account (repeatable); overrides [vector.embed.scope] accounts for this run")
 	embeddingsResumeCmd.Flags().StringArrayVar(&embedCollections, "collection", nil,

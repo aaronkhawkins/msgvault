@@ -167,6 +167,52 @@ func TestWorker_AbortsAfterConsecutiveFailures(t *testing.T) {
 		Equal(10, countMissing(t, f.MainDB, int64(f.BuildingGen)), "still missing")
 }
 
+func TestWorker_DeferFailedBatchContinuesAndBackstopRecovers(t *testing.T) {
+	f := newWorkerFixture(t, 6)
+	f.FakeClient.OnEmbed = func(inputs []string) ([][]float32, error) {
+		if strings.Contains(strings.Join(inputs, " "), "body 1") {
+			return nil, errors.New("simulated failed batch")
+		}
+		vectors := make([][]float32, len(inputs))
+		for i := range vectors {
+			vectors[i] = []float32{1, 0, 0, 0}
+		}
+		return vectors, nil
+	}
+	w := NewWorker(WorkerDeps{
+		Backend: f.Backend, VectorsDB: f.VectorsDB, MainDB: f.MainDB,
+		Store: f.Store, Client: f.FakeClient, BatchSize: 2,
+		DeferFailedBatches: true,
+	})
+	res, err := w.RunOnce(context.Background(), f.BuildingGen)
+	require.NoError(t, err)
+	assert.Equal(t, 4, res.Succeeded)
+	assert.Equal(t, 2, res.Failed)
+	assert.Equal(t, 2, countMissing(t, f.MainDB, int64(f.BuildingGen)))
+	assert.Equal(t, int64(6), readWatermark(t, f.VectorsDB, int64(f.BuildingGen)))
+
+	f.FakeClient.OnEmbed = nil
+	res, err = w.RunBackstop(context.Background(), f.BuildingGen)
+	require.NoError(t, err)
+	assert.Equal(t, 2, res.Succeeded)
+	assert.Zero(t, countMissing(t, f.MainDB, int64(f.BuildingGen)))
+}
+
+func TestWorker_DeferFailedBatchStopsOnConsecutiveFailureCap(t *testing.T) {
+	f := newWorkerFixture(t, 8)
+	f.FakeClient.FailNext(100)
+	w := NewWorker(WorkerDeps{
+		Backend: f.Backend, VectorsDB: f.VectorsDB, MainDB: f.MainDB,
+		Store: f.Store, Client: f.FakeClient, BatchSize: 2,
+		MaxConsecutiveFailures: 3, DeferFailedBatches: true,
+	})
+	_, err := w.RunOnce(context.Background(), f.BuildingGen)
+	require.ErrorContains(t, err, "consecutive failures")
+	assert.Equal(t, int64(4), readWatermark(t, f.VectorsDB, int64(f.BuildingGen)),
+		"only the first two failed batches are deferred")
+	assert.Equal(t, 8, countMissing(t, f.MainDB, int64(f.BuildingGen)))
+}
+
 func TestWorker_YieldCancellationDuringUpsertStopsCleanly(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)

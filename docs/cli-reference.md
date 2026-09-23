@@ -1729,6 +1729,7 @@ msgvault embeddings build [flags]
 |---|---|
 | `--full-rebuild` | Create a new index generation and rebuild from scratch. The new generation is activated atomically once coverage reaches zero. Same-model rebuilds keep serving the previous active generation in the meantime, but active-generation top-ups are frozen until activation; model or dimension changes return `index_stale` for vector/hybrid search until the new generation activates. |
 | `--yes` | Skip the confirmation prompt that `--full-rebuild` otherwise requires. |
+| `--defer-failed-batches` | In an incremental forward pass, leave a failed batch pending and continue beyond it. Several consecutive failures still stop the run. Retry deferred messages later with `embeddings resume --backstop`. |
 | `--account <identifier>` | Limit embedding to this account, by identifier or display name — numeric source IDs are rejected (repeatable). Overrides `[vector.embed.scope] accounts` for this run; configured `message_types` still apply. After activating this one-off scope, add the equivalent accounts to config and restart the daemon before searching. |
 | `--collection <name>` | Limit embedding to this collection's accounts (repeatable). Can be combined with `--account`; the scope is the union. This is a one-run override; persist the resolved accounts in config before restarting the daemon. |
 
@@ -1746,6 +1747,8 @@ msgvault embeddings resume
 ```
 
 Continue embedding work and finish the current generation. If a generation matching the configured embedding settings is building, this embeds its remaining rows and activates it once coverage reaches zero; otherwise it tops up the active generation. Equivalent to `msgvault embeddings build` with no flags, but never starts a full rebuild. Accepts the same `--account`/`--collection` scope flags as `embeddings build`.
+
+`--defer-failed-batches` keeps a failing forward batch unstamped and proceeds to later messages. A full backstop pass (`--backstop`) ignores the forward cursor and retries deferred messages; the generation cannot activate while they remain pending. Use the normal mode without deferral for that recovery pass.
 
 ### embeddings list
 
