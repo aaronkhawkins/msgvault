@@ -166,10 +166,11 @@ func runEmbed(cmd *cobra.Command) error {
 	runtime, err := newEmbeddingRuntime(cfg.Vector, embeddingRuntimeDeps{
 		Backend: backend, VectorsDB: vectorsDB, MainDB: s.DB(), Store: s,
 		Rebind: rebind, LastModifiedExpr: lastModifiedExpr,
-		TotalPending: totalPending,
-		Progress:     newProgressPrinter(errOut, totalPending, cfg.Vector.Embeddings.ETAWindow),
-		PersonGate:   personGate,
-		APIKey:       embeddingAPIKey,
+		TotalPending:       totalPending,
+		Progress:           newProgressPrinter(errOut, totalPending, cfg.Vector.Embeddings.ETAWindow),
+		DeferFailedBatches: embedDeferFailedBatches,
+		PersonGate:         personGate,
+		APIKey:             embeddingAPIKey,
 	})
 	if err != nil {
 		return fmt.Errorf("configure embedding runtime: %w", err)

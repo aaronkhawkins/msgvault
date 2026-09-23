@@ -67,6 +67,11 @@ type WorkerDeps struct {
 	BuildScope    vector.BuildScope
 	MaxInputChars int
 	BatchSize     int
+	// DeferFailedBatches lets a forward pass leave a failed batch unstamped
+	// and continue after it. The backstop always retries deferred rows.
+	// Consecutive failures still abort so an unavailable endpoint cannot
+	// sweep the entire corpus.
+	DeferFailedBatches bool
 	// beforeSkipStamp is a test hook for read-to-stamp race coverage.
 	beforeSkipStamp func(ctx context.Context, ids []int64)
 	// MaxConsecutiveFailures caps the number of consecutive batch
@@ -355,6 +360,17 @@ func (w *Worker) run(ctx context.Context, gen vector.GenerationID, backstop bool
 			}
 			consecutiveFailures++
 			lastErr = err
+			if w.deps.DeferFailedBatches && !backstop {
+				res.Failed += len(ids)
+				if consecutiveFailures >= w.deps.MaxConsecutiveFailures {
+					return res, fmt.Errorf("embed worker aborting after %d consecutive failures: %w",
+						consecutiveFailures, lastErr)
+				}
+				w.deps.Log.Warn("embed: deferring failed batch for backstop", "gen", gen, "ids", len(ids), "error", err)
+				afterID = batchMax
+				w.advanceWatermark(ctx, gen, batchMax, false)
+				continue
+			}
 
 			if errors.Is(err, ErrPermanent4xx) {
 				// Walk the scanned ids one at a time. Drain decides per-ID

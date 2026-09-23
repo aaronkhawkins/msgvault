@@ -42,18 +42,19 @@ type embeddingRuntime struct {
 }
 
 type embeddingRuntimeDeps struct {
-	Backend          vector.Backend
-	VectorsDB        *sql.DB
-	MainDB           *sql.DB
-	Store            *store.Store
-	Rebind           func(string) string
-	LastModifiedExpr string
-	TotalPending     int
-	Progress         func(embed.ProgressReport)
-	Log              *slog.Logger
-	PersonGate       vector.SemanticPersonEmbeddingGate
-	DocumentGate     embed.BeforeRequestFunc
-	QueryGate        embed.BeforeRequestFunc
+	Backend            vector.Backend
+	VectorsDB          *sql.DB
+	MainDB             *sql.DB
+	Store              *store.Store
+	Rebind             func(string) string
+	LastModifiedExpr   string
+	TotalPending       int
+	Progress           func(embed.ProgressReport)
+	DeferFailedBatches bool
+	Log                *slog.Logger
+	PersonGate         vector.SemanticPersonEmbeddingGate
+	DocumentGate       embed.BeforeRequestFunc
+	QueryGate          embed.BeforeRequestFunc
 	// APIKey is the text embedding credential resolved once from the provider
 	// credential store (or its environment fallback) at runtime start.
 	APIKey string
@@ -275,7 +276,8 @@ func newEmbeddingRuntime(vectorCfg vector.Config, deps embeddingRuntimeDeps) (*e
 			Store: deps.Store, Client: messageClient, Preprocess: embeddingPreprocessConfig(vectorCfg),
 			MaxInputChars: vectorCfg.Embeddings.MaxInputChars,
 			BatchSize:     vectorCfg.Embeddings.BatchSize, BuildScope: vectorCfg.Embed.Scope.BuildScope(),
-			Rebind: deps.Rebind, LastModifiedExpr: deps.LastModifiedExpr,
+			DeferFailedBatches: deps.DeferFailedBatches,
+			Rebind:             deps.Rebind, LastModifiedExpr: deps.LastModifiedExpr,
 			TotalPending: deps.TotalPending, Progress: deps.Progress, Log: deps.Log,
 		})
 		personWorker := embed.NewPersonWorker(embed.PersonWorkerDeps{
