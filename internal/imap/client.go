@@ -566,9 +566,25 @@ func (c *Client) listMailboxesLocked() ([]string, error) {
 		return nil, fmt.Errorf("LIST: %w", err)
 	}
 
+	// Gmail can omit \NoSelect from its [Gmail] namespace container.
+	// Require the actual Gmail IMAP host and a special-use All Mail child:
+	// another provider may have a selectable mailbox named [Gmail].
+	gmailNamespace := c.config != nil &&
+		(c.config.TLS || c.config.STARTTLS) &&
+		strings.EqualFold(c.config.Host, "imap.gmail.com")
+	if gmailNamespace {
+		gmailNamespace = false
+		for _, item := range items {
+			if strings.HasPrefix(item.Mailbox, "[Gmail]/") && hasAttr(item.Attrs, imap.MailboxAttrAll) {
+				gmailNamespace = true
+				break
+			}
+		}
+	}
+
 	var names []string
 	for _, item := range items {
-		if hasAttr(item.Attrs, imap.MailboxAttrNoSelect) {
+		if hasAttr(item.Attrs, imap.MailboxAttrNoSelect) || (gmailNamespace && item.Mailbox == "[Gmail]") {
 			continue
 		}
 		names = append(names, item.Mailbox)

@@ -27,6 +27,34 @@ type legacyListSession struct {
 	imapserver.Session
 }
 
+type gmailNamespaceListSession struct {
+	imapserver.Session
+	allMailSpecialUse bool
+}
+
+func (s *gmailNamespaceListSession) List(
+	w *imapserver.ListWriter,
+	_ string,
+	_ []string,
+	_ *imapapi.ListOptions,
+) error {
+	for _, item := range []imapapi.ListData{
+		{Delim: '/', Mailbox: "INBOX"},
+		{Delim: '/', Mailbox: "[Gmail]"},
+		{Delim: '/', Mailbox: "[Gmail]/All Mail"},
+		{Delim: '/', Mailbox: "Projects"},
+		{Delim: '/', Mailbox: "Projects/Current"},
+	} {
+		if item.Mailbox == "[Gmail]/All Mail" && s.allMailSpecialUse {
+			item.Attrs = []imapapi.MailboxAttr{imapapi.MailboxAttrAll}
+		}
+		if err := w.WriteList(&item); err != nil {
+			return fmt.Errorf("write LIST response: %w", err)
+		}
+	}
+	return nil
+}
+
 func (s *legacyListSession) List(
 	w *imapserver.ListWriter,
 	_ string,
@@ -155,6 +183,91 @@ func TestListMailboxesUsesBasicListWithoutSpecialUseCapability(t *testing.T) {
 	})
 	require.NoError(err, "legacy mailbox listing")
 	assert.Equal([]string{"INBOX"}, mailboxes)
+}
+
+func TestListMailboxesSkipsGmailNamespaceContainerWithoutNoSelect(t *testing.T) {
+	for _, tc := range []struct {
+		name              string
+		gmailHost         bool
+		secureTransport   bool
+		allMailSpecialUse bool
+		want              []string
+	}{
+		{
+			name:              "Gmail All Mail child proves namespace container",
+			gmailHost:         true,
+			secureTransport:   true,
+			allMailSpecialUse: true,
+			want:              []string{"INBOX", "[Gmail]/All Mail", "Projects", "Projects/Current"},
+		},
+		{
+			name:              "other provider keeps a selectable parent",
+			allMailSpecialUse: true,
+			want:              []string{"INBOX", "[Gmail]", "[Gmail]/All Mail", "Projects", "Projects/Current"},
+		},
+		{
+			name:            "without Gmail All Mail special use parent remains selectable",
+			gmailHost:       true,
+			secureTransport: true,
+			want:            []string{"INBOX", "[Gmail]", "[Gmail]/All Mail", "Projects", "Projects/Current"},
+		},
+		{
+			name:              "plain connection cannot prove Gmail host",
+			gmailHost:         true,
+			allMailSpecialUse: true,
+			want:              []string{"INBOX", "[Gmail]", "[Gmail]/All Mail", "Projects", "Projects/Current"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			user := imapmemserver.NewUser("owner@example.test", "test-password")
+			memServer := imapmemserver.New()
+			memServer.AddUser(user)
+			server := imapserver.New(&imapserver.Options{
+				NewSession: func(*imapserver.Conn) (imapserver.Session, *imapserver.GreetingData, error) {
+					return &gmailNamespaceListSession{
+						Session:           memServer.NewSession(),
+						allMailSpecialUse: tc.allMailSpecialUse,
+					}, nil, nil
+				},
+				Caps: imapapi.CapSet{
+					imapapi.CapIMAP4rev1:    {},
+					imapapi.CapListExtended: {},
+					imapapi.CapSpecialUse:   {},
+				},
+				InsecureAuth: true,
+			})
+			listener, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			go func() { _ = server.Serve(listener) }()
+			t.Cleanup(func() { _ = server.Close() })
+
+			host, portText, err := net.SplitHostPort(listener.Addr().String())
+			require.NoError(t, err)
+			port, err := strconv.Atoi(portText)
+			require.NoError(t, err)
+			client := NewClient(&Config{
+				Host:     host,
+				Port:     port,
+				Username: "owner@example.test",
+			}, "test-password")
+			t.Cleanup(func() { _ = client.Close() })
+
+			var mailboxes []string
+			err = client.withConn(t.Context(), func(*imapclient.Client) error {
+				if tc.gmailHost {
+					// The fixture is local; the live connection is already
+					// established before the provider identity is applied.
+					client.config.Host = "imap.gmail.com"
+				}
+				client.config.TLS = tc.secureTransport
+				var listErr error
+				mailboxes, listErr = client.listMailboxesLocked()
+				return listErr
+			})
+			require.NoError(t, err)
+			assert.Equal(t, tc.want, mailboxes)
+		})
+	}
 }
 
 func TestEnumerateMailboxSearchCriteriaConstrainsUIDRange(t *testing.T) {
