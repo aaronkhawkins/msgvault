@@ -1517,9 +1517,17 @@ func (s *Server) sourceStatus(statusStore SourceStatusStore, source *store.Sourc
 		case sourceScheduleGeneric:
 			schedulerRunning = s.applyGenericJobStatus(&status, scheduling.jobName)
 		case sourceScheduleAccount:
-			status.Scheduled = s.scheduler.IsScheduled(source.Identifier)
+			account := source.Identifier
+			if source.SourceType == "imap" && !s.scheduler.IsScheduled(account) &&
+				source.DisplayName.Valid && source.DisplayName.String != "" {
+				// IMAP source IDs are URLs; add-imap records the scheduler's
+				// account email as the display name, which scheduled sync can
+				// also use to resolve the source.
+				account = source.DisplayName.String
+			}
+			status.Scheduled = s.scheduler.IsScheduled(account)
 			for _, scheduled := range s.scheduler.Status() {
-				if scheduled.Email != source.Identifier {
+				if scheduled.Email != account {
 					continue
 				}
 				status.Schedule = scheduled.Schedule
@@ -1691,11 +1699,32 @@ func (s *Server) handleTriggerSync(w http.ResponseWriter, r *http.Request) {
 		})
 		return
 	case sourceScheduleAccount:
-		if !s.scheduler.IsScheduled(account) {
+		schedulerAccount := account
+		if sourceType == "imap" && !s.scheduler.IsScheduled(account) &&
+			(strings.HasPrefix(account, "imaps://") ||
+				strings.HasPrefix(account, "imap://") || strings.HasPrefix(account, "imap+starttls://")) {
+			statusStore, ok := s.store.(SourceStatusStore)
+			if !ok {
+				writeError(w, http.StatusServiceUnavailable, "store_unavailable", "Database not available")
+				return
+			}
+			sources, err := statusStore.ListSources("imap")
+			if err != nil {
+				writeError(w, http.StatusInternalServerError, "internal_error", "Failed to resolve IMAP source")
+				return
+			}
+			for _, source := range sources {
+				if source.Identifier == account && source.DisplayName.Valid {
+					schedulerAccount = source.DisplayName.String
+					break
+				}
+			}
+		}
+		if !s.scheduler.IsScheduled(schedulerAccount) {
 			writeError(w, http.StatusNotFound, "not_found", "Account is not scheduled: "+account)
 			return
 		}
-		if err := s.scheduler.TriggerSync(account); err != nil {
+		if err := s.scheduler.TriggerSync(schedulerAccount); err != nil {
 			s.logger.Error("failed to trigger sync", "account", account, "error", err)
 			writeError(w, http.StatusConflict, "sync_error", err.Error())
 			return
