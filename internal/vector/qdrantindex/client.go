@@ -207,7 +207,9 @@ func (c *Client) Search(ctx context.Context, vector []float32, limit int) ([]Mat
 	}
 	err := c.request(ctx, http.MethodPost, c.collectionPath()+"/points/query", map[string]any{
 		"query": vector, "limit": limit, "with_payload": []string{"message_id", "chunk_index"},
-		"params": map[string]any{"hnsw_ef": 128},
+		// The 2048-dimension personal index missed a true top hit at ef=128;
+		// ef=2048 restored it while cached-vector queries stayed in milliseconds.
+		"params": map[string]any{"hnsw_ef": 2048},
 	}, &result)
 	if err != nil {
 		return nil, err
