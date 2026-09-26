@@ -99,6 +99,44 @@ func TestMessageIDHeaderFetchOptionsAvoidsRawMessageBody(t *testing.T) {
 	assert.Equal([]string{"Message-ID"}, opts.BodySection[0].HeaderFields)
 }
 
+func TestRawMIMEMessageIDMatchesImporterForRecoverableHeader(t *testing.T) {
+	require := require.New(t)
+	// The mail parser rejects spaces in an ID, but the normal MIME importer
+	// preserves this header. An empty IMAP identity would leave its mailbox
+	// membership unable to resolve after a clean full scan.
+	const id = "<legacy id@example.test>"
+	header := []byte("Message-ID: " + id + "\r\n\r\n")
+	require.Equal(id, rawMIMEMessageID(header))
+	require.Equal(id, rawMIMEMessageID(append(append([]byte(nil), header...), []byte("body")...)))
+	require.Empty(rawMIMEMessageID([]byte("Message-ID: <broken>suffix\r\n\r\n")))
+}
+
+func TestRecoverableMessageIDConnectsAllMailToSecondaryMembership(t *testing.T) {
+	require := require.New(t)
+	addr, user := testutil.StartIMAPMemServerWithSpecialUse(
+		t,
+		map[string]int{"[Gmail]/All Mail": 0, "Archive": 0},
+		map[string][]imapapi.MailboxAttr{"[Gmail]/All Mail": {imapapi.MailboxAttrAll}},
+	)
+	const id = "legacy id@example.test"
+	testutil.AppendIMAPMessageWithMessageID(t, user, "[Gmail]/All Mail", id)
+	testutil.AppendIMAPMessageWithMessageID(t, user, "Archive", id)
+	client := newTestClient(t, addr)
+	require.Equal([]string{"[Gmail]/All Mail|1"}, listAllMessages(t, client),
+		"the secondary copy must not be listed as unidentified")
+	results, err := client.GetMessagesRawBatchWithErrors(
+		context.Background(), []string{"[Gmail]/All Mail|1"})
+	require.NoError(err)
+	require.Len(results, 1)
+	require.NotNil(results[0].Message)
+	require.NotEmpty(results[0].Message.Raw)
+	observed := client.ObservedMemberships()
+	require.Len(observed, 2)
+	for _, membership := range observed {
+		require.Equal("<"+id+">", membership.RFC822MessageID)
+	}
+}
+
 func TestRawBatchFetchRecordsMembershipBeforeDedup(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
@@ -658,7 +696,7 @@ func TestApplyFetchResultsImportsWhenRawMessageIDMissingOrInvalid(t *testing.T) 
 		},
 		{
 			name: "invalid message id value",
-			raw:  []byte("Message-ID: not a message id\r\n\r\nbody"),
+			raw:  []byte("Message-ID: <broken>suffix\r\n\r\nbody"),
 		},
 	}
 
