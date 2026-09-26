@@ -730,6 +730,7 @@ export * from "./valueEnvelope";
 export * from "./valueEnvelopeInput";
 export * from "./vCardIdentity";
 export * from "./vectorHealth";
+export * from "./vectorIndexStatus";
 export * from "./verifyCLIParams";
 export * from "./visualBuildRequest";
 export * from "./visualGeneration";
