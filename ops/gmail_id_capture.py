@@ -116,7 +116,8 @@ def record(ledger, message_id, source_message_id, mailbox, epoch,
                        (message_id,))
 
 
-def capture(archive, ledger, config, token, limit, refresh_thread=False):
+def capture(archive, ledger, config, token, limit,
+            refresh_thread=False, retry_unresolved=False):
     source = archive.execute(
         "SELECT id, identifier FROM sources WHERE source_type = 'imap'"
     ).fetchall()
@@ -129,10 +130,18 @@ def capture(archive, ledger, config, token, limit, refresh_thread=False):
     ledger = open_ledger(ledger, archive_uid, source_id)
     try:
         before = ledger.execute("SELECT next_before_id FROM migration").fetchone()[0]
+        if refresh_thread and retry_unresolved:
+            raise ValueError("choose either thread refresh or unresolved retry")
         if refresh_thread:
             candidates = ledger.execute("""
                 SELECT message_id, source_message_id FROM capture
                 WHERE gmail_thread_id IS NULL AND status = 'mapped'
+                ORDER BY message_id DESC LIMIT ?
+            """, (limit,)).fetchall()
+        elif retry_unresolved:
+            candidates = ledger.execute("""
+                SELECT message_id, source_message_id FROM capture
+                WHERE status <> 'mapped'
                 ORDER BY message_id DESC LIMIT ?
             """, (limit,)).fetchall()
         else:
@@ -231,7 +240,11 @@ def main():
     parser.add_argument("--limit", type=int, default=100)
     parser.add_argument("--refresh-thread", action="store_true",
                         help="backfill thread IDs for already mapped rows")
+    parser.add_argument("--retry-unresolved", action="store_true",
+                        help="retry missing or failed UID mappings without rewinding capture")
     args = parser.parse_args()
+    if args.refresh_thread and args.retry_unresolved:
+        parser.error("choose either thread refresh or unresolved retry")
     if not 1 <= args.limit <= 1000:
         parser.error("limit must be between 1 and 1000")
     root = args.home.expanduser().resolve()
@@ -243,7 +256,7 @@ def main():
     archive = sqlite3.connect(f"file:{root / 'msgvault.db'}?mode=ro", uri=True)
     try:
         capture(archive, args.ledger.expanduser(), config, token,
-                args.limit, args.refresh_thread)
+                args.limit, args.refresh_thread, args.retry_unresolved)
     finally:
         archive.close()
 

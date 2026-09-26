@@ -13,6 +13,8 @@ spec.loader.exec_module(capture_module)
 
 
 class FakeIMAP:
+    missing = {2}
+
     def __init__(self, *_args, **_kwargs):
         self.mailbox = None
 
@@ -36,7 +38,7 @@ class FakeIMAP:
         assert fields == "(UID X-GM-MSGID X-GM-THRID)"
         return "OK", [
             f"1 (UID {uid} X-GM-MSGID {1000 + int(uid)} X-GM-THRID 2000)".encode()
-            for uid in numbers.split(",") if uid != "2"
+            for uid in numbers.split(",") if int(uid) not in self.missing
         ]
 
     def logout(self):
@@ -82,6 +84,16 @@ class CaptureTest(unittest.TestCase):
             self.assertEqual(3, archive.execute("SELECT COUNT(*) FROM messages").fetchone()[0])
             self.assertEqual("imap", archive.execute(
                 "SELECT source_type FROM sources").fetchone()[0])
+            with patch.object(capture_module.imaplib, "IMAP4_SSL", FakeIMAP):
+                with patch.object(FakeIMAP, "missing", set()):
+                    capture_module.capture(archive, ledger_path, config,
+                                           {"password": "synthetic"}, 1,
+                                           retry_unresolved=True)
+            self.assertEqual("mapped", ledger.execute(
+                "SELECT status FROM capture WHERE message_id = 2").fetchone()[0])
+            self.assertEqual(1, ledger.execute(
+                "SELECT next_before_id FROM migration").fetchone()[0],
+                "retry must not rewind the forward capture cursor")
             ledger.close()
             archive.close()
 
