@@ -1360,13 +1360,6 @@ func (c *Client) buildMessageListCache(ctx context.Context) error {
 			}
 			knownUIDs = uidsToUint32(uids)
 		}
-		if condstoreFallback && canTrackFolder &&
-			!statusMessageCount(trackState, len(knownUIDs)) {
-			// A failed incremental search may have returned an incomplete UID
-			// set. The fallback must not retire memberships unless its own
-			// enumeration agrees with a fresh STATUS count.
-			return false
-		}
 		if observed != nil {
 			observed.KnownUIDs = knownUIDs
 			observed.UIDNext = baselineUIDNext(observed.UIDNext, knownUIDs)
@@ -1437,6 +1430,14 @@ func (c *Client) buildMessageListCache(ctx context.Context) error {
 	}
 	statusesComplete := folderStatusesCoverMailboxes(allMailboxes, folderStatuses)
 	authoritativeSnapshot := trackFolders && !c.labelsSnapshotFilteredLocked()
+	if authoritativeSnapshot && condstoreFallback &&
+		!fallbackMailboxCountsMatch(allMailboxes, folderStatuses,
+			c.observedMailboxDeltas, c.observedMemberships) {
+		// The fallback may have received an incomplete UID SEARCH in any
+		// mailbox, including a label mailbox that buildLabelMap enumerated but
+		// listOne never visits. A partial snapshot must not retire memberships.
+		enumerationComplete = false
+	}
 	if authoritativeSnapshot && (!statusesComplete || !labelMapComplete || !enumerationComplete) {
 		labelMapComplete = false
 		c.observedFolderStates = nil
@@ -1502,6 +1503,36 @@ func (c *Client) buildMessageListCache(ctx context.Context) error {
 	c.activeSourceAliases = activeSourceAliases
 	c.labelMapComplete = labelMapComplete && enumerationComplete
 	return nil
+}
+
+func fallbackMailboxCountsMatch(
+	mailboxes []string, statuses map[string]FolderState,
+	deltas []MailboxDelta, observations []MembershipObservation,
+) bool {
+	knownByMailbox := make(map[string]int, len(deltas))
+	for _, delta := range deltas {
+		knownByMailbox[delta.Mailbox] = len(delta.State.KnownUIDs)
+	}
+	observedByMailbox := make(map[string]map[uint32]struct{})
+	for _, observation := range observations {
+		if observation.UIDValidity != statuses[observation.Mailbox].UIDValidity {
+			continue
+		}
+		if observedByMailbox[observation.Mailbox] == nil {
+			observedByMailbox[observation.Mailbox] = make(map[uint32]struct{})
+		}
+		observedByMailbox[observation.Mailbox][observation.UID] = struct{}{}
+	}
+	for _, mailbox := range mailboxes {
+		count, listed := knownByMailbox[mailbox]
+		if !listed {
+			count = len(observedByMailbox[mailbox])
+		}
+		if !statusMessageCount(statuses[mailbox], count) {
+			return false
+		}
+	}
+	return true
 }
 
 // deltasCoverMailboxes reports whether every current mailbox appears in the

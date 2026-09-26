@@ -86,6 +86,10 @@ func (c *Client) collectCondstoreMailbox(
 	if !slices.Equal(tail, newUIDs) {
 		return MailboxDelta{}, fmt.Errorf("CONDSTORE %q UID searches disagree", mailbox)
 	}
+	liveUIDs := make(map[imap.UID]struct{}, len(current))
+	for _, uid := range current {
+		liveUIDs[uid] = struct{}{}
+	}
 
 	changed := make(map[imap.UID]struct{}, len(added))
 	for _, uid := range added {
@@ -101,8 +105,8 @@ func (c *Client) collectCondstoreMailbox(
 			return MailboxDelta{}, fmt.Errorf("CONDSTORE CHANGEDSINCE in %q: %w", mailbox, fetchErr)
 		}
 		for _, msg := range msgs {
-			if msg.UID == 0 || msg.ModSeq <= prior.HighestModSeq ||
-				!slices.Contains(current, msg.UID) {
+			_, live := liveUIDs[msg.UID]
+			if msg.UID == 0 || msg.ModSeq <= prior.HighestModSeq || !live {
 				return MailboxDelta{}, fmt.Errorf("CONDSTORE %q returned inconsistent changed UID", mailbox)
 			}
 			changed[msg.UID] = struct{}{}

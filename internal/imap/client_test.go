@@ -29,6 +29,7 @@ type legacyListSession struct {
 
 type gmailNamespaceListSession struct {
 	imapserver.Session
+
 	allMailSpecialUse bool
 }
 
@@ -219,6 +220,8 @@ func TestListMailboxesSkipsGmailNamespaceContainerWithoutNoSelect(t *testing.T) 
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			require := require.New(t)
+			assert := assert.New(t)
 			user := imapmemserver.NewUser("owner@example.test", "test-password")
 			memServer := imapmemserver.New()
 			memServer.AddUser(user)
@@ -237,14 +240,14 @@ func TestListMailboxesSkipsGmailNamespaceContainerWithoutNoSelect(t *testing.T) 
 				InsecureAuth: true,
 			})
 			listener, err := net.Listen("tcp", "127.0.0.1:0")
-			require.NoError(t, err)
+			require.NoError(err)
 			go func() { _ = server.Serve(listener) }()
 			t.Cleanup(func() { _ = server.Close() })
 
 			host, portText, err := net.SplitHostPort(listener.Addr().String())
-			require.NoError(t, err)
+			require.NoError(err)
 			port, err := strconv.Atoi(portText)
-			require.NoError(t, err)
+			require.NoError(err)
 			client := NewClient(&Config{
 				Host:     host,
 				Port:     port,
@@ -264,8 +267,8 @@ func TestListMailboxesSkipsGmailNamespaceContainerWithoutNoSelect(t *testing.T) 
 				mailboxes, listErr = client.listMailboxesLocked()
 				return listErr
 			})
-			require.NoError(t, err)
-			assert.Equal(t, tc.want, mailboxes)
+			require.NoError(err)
+			assert.Equal(tc.want, mailboxes)
 		})
 	}
 }
