@@ -2320,6 +2320,9 @@ var exclusiveLockTables = []string{
 	"sync_operations",
 	"source_import_items", "sync_run_items", "sync_checkpoints",
 	"imap_folder_state", "imap_message_memberships",
+	// Adoption writes these during source conversion and first native sync;
+	// both also cascade when a source is removed.
+	"gmail_thread_adoption", "gmail_archive_only_adoption",
 }
 
 // BeginExclusive opens a transaction on conn and locks every table the

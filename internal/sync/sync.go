@@ -984,16 +984,38 @@ func (s *Syncer) FullWithFinalizer(
 		resolvedSource.SourceType = sourceType
 	}
 	return s.runWithSyncExecution(ctx, resolvedSource.ID, func(execution *store.SyncExecution) (*gmail.SyncSummary, error) {
-		if sourceType == sourceTypeGmail && !s.opts.NoResume && s.opts.Query == "" && s.opts.Limit == 0 {
-			prior, priorErr := s.store.GetLatestCheckpointedSync(resolvedSource.ID)
-			if priorErr != nil && !errors.Is(priorErr, store.ErrSyncRunNotFound) {
-				return nil, fmt.Errorf("check checkpointed history recovery: %w", priorErr)
+		if sourceType == sourceTypeGmail && s.opts.Query == "" && s.opts.Limit == 0 {
+			adoptionPending := false
+			if !resolvedSource.SyncCursor.Valid || resolvedSource.SyncCursor.String == "" {
+				var adoptionErr error
+				adoptionPending, adoptionErr = s.store.HasGmailThreadAdoption(resolvedSource.ID)
+				if adoptionErr != nil {
+					return nil, adoptionErr
+				}
 			}
-			if isPinnedHistoryRecovery(prior) {
-				return s.recoverExpiredHistory(ctx, &resolvedSource, execution)
+			var prior *store.SyncRun
+			if !s.opts.NoResume {
+				var priorErr error
+				prior, priorErr = s.store.GetLatestCheckpointedSync(resolvedSource.ID)
+				if priorErr != nil && !errors.Is(priorErr, store.ErrSyncRunNotFound) {
+					return nil, fmt.Errorf("check checkpointed history recovery: %w", priorErr)
+				}
+			}
+			if adoptionPending || isPinnedHistoryRecovery(prior) {
+				summary, err := s.recoverExpiredHistory(ctx, &resolvedSource, execution,
+					adoptionPending)
+				if err != nil {
+					return nil, err
+				}
+				if finalizer != nil {
+					if err := finalizer(summary); err != nil {
+						return nil, fmt.Errorf("finalize full sync: %w", err)
+					}
+				}
+				return summary, nil
 			}
 		}
-		summary, err := s.full(ctx, &resolvedSource, false, execution)
+		summary, err := s.full(ctx, &resolvedSource, false, false, execution)
 		if err != nil {
 			return nil, err
 		}
@@ -1043,7 +1065,15 @@ func (s *Syncer) RecoverExpiredHistory(
 		return nil, err
 	}
 	return s.runWithSyncExecution(ctx, source.ID, func(execution *store.SyncExecution) (*gmail.SyncSummary, error) {
-		return s.recoverExpiredHistory(ctx, source, execution)
+		adoptionPending := false
+		if !source.SyncCursor.Valid || source.SyncCursor.String == "" {
+			var err error
+			adoptionPending, err = s.store.HasGmailThreadAdoption(source.ID)
+			if err != nil {
+				return nil, err
+			}
+		}
+		return s.recoverExpiredHistory(ctx, source, execution, adoptionPending)
 	})
 }
 
@@ -1056,11 +1086,58 @@ func (s *Syncer) validateHistoryRecoveryOptions() error {
 
 func (s *Syncer) recoverExpiredHistory(
 	ctx context.Context, source *store.Source, execution *store.SyncExecution,
+	preserveAbsentAtAdoption bool,
 ) (*gmail.SyncSummary, error) {
 	if err := s.validateHistoryRecoveryOptions(); err != nil {
 		return nil, err
 	}
-	fullSummary, err := s.full(ctx, source, true, execution)
+	if preserveAbsentAtAdoption {
+		// A completed adoption listing can be followed by a failed history
+		// catch-up. Resume at its pinned handoff cursor instead of paying for
+		// another complete provider listing. The source cursor stays empty
+		// until that catch-up itself commits successfully.
+		prior, err := s.store.GetLastSuccessfulSyncByType(source.ID, "full")
+		if err != nil && !errors.Is(err, store.ErrSyncRunNotFound) {
+			return nil, fmt.Errorf("check adoption listing: %w", err)
+		}
+		if prior != nil && isPinnedHistoryRecovery(prior) {
+			catchupSource := *source
+			catchupSource.SyncCursor = prior.CursorAfter
+			catchup, catchupErr := s.incrementalWithCompletionMode(
+				ctx, &catchupSource, execution, true)
+			if !errors.Is(catchupErr, ErrHistoryExpired) {
+				return catchup, catchupErr
+			}
+			// An interrupted cutover can outlive Gmail's pinned history
+			// boundary. Re-enumerate with a fresh boundary rather than retrying
+			// the expired one forever; existing archived bodies are skipped.
+			options := *s.opts
+			options.NoResume = true
+			freshSyncer := *s
+			freshSyncer.opts = &options
+			s = &freshSyncer
+		}
+		// A partial listing with item errors cannot become a baseline. Its
+		// checkpoint carries the error count, so resuming that prefix would
+		// never clear it even after the item recovers. Restart the provider
+		// listing with a fresh pinned boundary; archived raw is still skipped.
+		failed, failedErr := s.store.GetLatestCheckpointedSync(source.ID)
+		if failedErr != nil && !errors.Is(failedErr, store.ErrSyncRunNotFound) {
+			return nil, fmt.Errorf("check failed adoption listing: %w", failedErr)
+		}
+		if failed != nil && isPinnedHistoryRecovery(failed) &&
+			failed.ErrorsCount > 0 {
+			options := *s.opts
+			options.NoResume = true
+			freshSyncer := *s
+			freshSyncer.opts = &options
+			s = &freshSyncer
+		}
+	}
+	// The first native traversal after IMAP adoption must fill the provider gap
+	// without treating historical archive copies as deletions. Later recovery
+	// keeps the ordinary authoritative absence reconciliation.
+	fullSummary, err := s.full(ctx, source, true, !preserveAbsentAtAdoption, execution)
 	if err != nil {
 		return nil, fmt.Errorf("recover expired history: full sync: %w", err)
 	}
@@ -1068,7 +1145,13 @@ func (s *Syncer) recoverExpiredHistory(
 	if err != nil {
 		return nil, fmt.Errorf("recover expired history: reload source: %w", err)
 	}
-	catchup, err := s.incremental(ctx, refreshed, execution)
+	if preserveAbsentAtAdoption {
+		refreshed.SyncCursor = sql.NullString{
+			String: strconv.FormatUint(fullSummary.FinalHistoryID, 10), Valid: true,
+		}
+	}
+	catchup, err := s.incrementalWithCompletionMode(ctx, refreshed, execution,
+		preserveAbsentAtAdoption)
 	if err != nil {
 		return nil, fmt.Errorf("recover expired history: catch up from full-sync cursor: %w", err)
 	}
@@ -1105,6 +1188,15 @@ func (s *Syncer) incrementalWithHistoryRecovery(
 	onRecovery func(resumed bool),
 	execution *store.SyncExecution,
 ) (*gmail.SyncSummary, error) {
+	adoptionPending := false
+	if source.SourceType == sourceTypeGmail &&
+		(!source.SyncCursor.Valid || source.SyncCursor.String == "") {
+		var adoptionErr error
+		adoptionPending, adoptionErr = s.store.HasGmailThreadAdoption(source.ID)
+		if adoptionErr != nil {
+			return nil, adoptionErr
+		}
+	}
 	prior, err := s.store.GetLatestCheckpointedSync(source.ID)
 	if err != nil && !errors.Is(err, store.ErrSyncRunNotFound) {
 		return nil, fmt.Errorf("check checkpointed history recovery: %w", err)
@@ -1116,7 +1208,17 @@ func (s *Syncer) incrementalWithHistoryRecovery(
 		if onRecovery != nil {
 			onRecovery(true)
 		}
-		return s.recoverExpiredHistory(ctx, source, execution)
+		return s.recoverExpiredHistory(ctx, source, execution, adoptionPending)
+	}
+	// An in-place IMAP→Gmail adoption deliberately leaves the source cursor
+	// empty. Its provider history boundary was captured after the last IMAP
+	// sync, so starting incremental there could miss messages in the gap.
+	// Enumerate one complete Gmail mailbox before publishing any cursor.
+	if adoptionPending {
+		if onRecovery != nil {
+			onRecovery(false)
+		}
+		return s.recoverExpiredHistory(ctx, source, execution, true)
 	}
 
 	summary, err := s.incremental(ctx, source, execution)
@@ -1126,12 +1228,13 @@ func (s *Syncer) incrementalWithHistoryRecovery(
 	if onRecovery != nil {
 		onRecovery(false)
 	}
-	return s.recoverExpiredHistory(ctx, source, execution)
+	return s.recoverExpiredHistory(ctx, source, execution, false)
 }
 
 func (s *Syncer) full(
 	ctx context.Context,
 	source *store.Source,
+	pinHistory bool,
 	reconcilePresence bool,
 	execution *store.SyncExecution,
 ) (summary *gmail.SyncSummary, err error) {
@@ -1141,7 +1244,7 @@ func (s *Syncer) full(
 	// Recovery may only resume a run that pinned its history handoff cursor.
 	// Ordinary full-sync checkpoints predate that cursor and are unsafe to reuse.
 	var state *syncState
-	if reconcilePresence {
+	if pinHistory {
 		state, err = s.initHistoryRecoveryState(ctx, source.ID, execution)
 	} else {
 		state, err = s.initSyncState(ctx, source.ID, execution)
@@ -1176,7 +1279,7 @@ func (s *Syncer) full(
 		return nil, fmt.Errorf("get profile: %w", err)
 	}
 	handoffHistoryID := profile.HistoryID
-	if reconcilePresence {
+	if pinHistory {
 		if state.handoffCursor == "" {
 			state.handoffCursor = strconv.FormatUint(profile.HistoryID, 10)
 			if err := s.store.PinSyncHandoffCursorContext(ctx, state.syncID, state.handoffCursor); err != nil {
@@ -1209,10 +1312,28 @@ func (s *Syncer) full(
 	var discoveryHealth pageDiscoveryHealth
 	firstPage := true
 	pageToken := state.pageToken
+	var adoptionLister gmail.CompleteMessageSnapshotReader
+	if pinHistory && !reconcilePresence {
+		var ok bool
+		adoptionLister, ok = s.client.(gmail.CompleteMessageSnapshotReader)
+		if !ok {
+			err := errors.New("complete Gmail message listing is unavailable for adoption")
+			s.failStoppedSync(state.syncID, err)
+			return nil, err
+		}
+	}
 
 	for {
 		// List messages
-		listResp, err := s.client.ListMessages(ctx, s.opts.Query, pageToken)
+		var listResp *gmail.MessageListResponse
+		if adoptionLister != nil {
+			// The gap before the pinned history boundary may contain messages
+			// already in Spam or Trash. The ordinary ListMessages API omits
+			// those, so adoption must use the complete provider inventory.
+			listResp, err = adoptionLister.ListCompleteMessageSnapshot(ctx, pageToken)
+		} else {
+			listResp, err = s.client.ListMessages(ctx, s.opts.Query, pageToken)
+		}
 		if err != nil {
 			s.failStoppedSync(state.syncID, err)
 			return nil, fmt.Errorf("list messages: %w", err)
@@ -1291,6 +1412,19 @@ func (s *Syncer) full(
 		}
 	}
 
+	if pinHistory && !reconcilePresence && state.checkpoint.ErrorsCount > 0 {
+		err := fmt.Errorf("adoption listing has %d unresolved items", state.checkpoint.ErrorsCount)
+		s.failStoppedSync(state.syncID, err)
+		return nil, err
+	}
+	var adoptionPresent map[string]struct{}
+	if pinHistory && !reconcilePresence {
+		adoptionPresent, err = s.listCompleteMessageSnapshot(ctx)
+		if err != nil {
+			s.failStoppedSync(state.syncID, err)
+			return nil, fmt.Errorf("list complete adopted Gmail snapshot: %w", err)
+		}
+	}
 	if reconcilePresence {
 		present, err := s.listCompleteMessageSnapshot(ctx)
 		if err != nil {
@@ -1314,17 +1448,27 @@ func (s *Syncer) full(
 	}
 
 	// Update source with final history ID.
-	// Full sync always advances the cursor (it records the starting point
-	// for future incremental syncs), but warn when errors occurred.
+	// An adoption listing cannot publish a history cursor while any provider
+	// item failed: the skipped item may predate the handoff boundary and never
+	// appear in future history. Ordinary full sync retains its error ledger.
 	historyIDStr := strconv.FormatUint(handoffHistoryID, 10)
 	if state.checkpoint.ErrorsCount > 0 {
 		s.logger.Warn("full sync completed with errors",
 			"errors", state.checkpoint.ErrorsCount,
 			"history_id", historyIDStr)
 	}
-	// Mark sync complete before running best-effort provider maintenance.
-	if err := s.completeSyncAndRunHook(ctx, state.syncID, historyIDStr, source, true); err != nil {
-		return nil, err
+	// The adoption listing has established its own pinned history boundary,
+	// but only its subsequent incremental catch-up may publish that cursor.
+	if pinHistory && !reconcilePresence {
+		if err := s.store.CompleteAdoptedGmailListingContext(ctx,
+			state.syncID, source.ID, historyIDStr, adoptionPresent); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := s.completeSyncAndRunHook(ctx, state.syncID, historyIDStr,
+			source, true); err != nil {
+			return nil, err
+		}
 	}
 
 	// Checkpoint WAL after sync to fold it back into the main database.

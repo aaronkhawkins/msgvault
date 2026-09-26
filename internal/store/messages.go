@@ -1054,9 +1054,35 @@ func (s *Store) EnsureConversation(sourceID int64, sourceConversationID, title s
 	return ensureConversation(s.db, s.dialect, sourceID, sourceConversationID, title)
 }
 
+// HasGmailThreadAdoption identifies a source that was converted in place from
+// IMAP. A new native Gmail source with no history cursor still uses the normal
+// first full-sync contract; only adopted sources need the gap-safe bootstrap.
+func (s *Store) HasGmailThreadAdoption(sourceID int64) (bool, error) {
+	var adopted bool
+	err := s.db.QueryRow(s.Rebind(`SELECT EXISTS(SELECT 1 FROM gmail_thread_adoption
+		WHERE source_id = ?)`), sourceID).Scan(&adopted)
+	if err != nil {
+		return false, fmt.Errorf("check Gmail source adoption: %w", err)
+	}
+	return adopted, nil
+}
+
 func ensureConversation(
 	q querier, dialect Dialect, sourceID int64, sourceConversationID, title string,
 ) (int64, error) {
+	// An adopted Gmail thread may already contain IMAP messages in more than
+	// one historical conversation. Preserve those rows and route new mail to
+	// the canonical existing conversation selected during adoption.
+	var adoptedID int64
+	adoptedErr := q.QueryRow(`SELECT conversation_id FROM gmail_thread_adoption
+		WHERE source_id = ? AND gmail_thread_id = ?`,
+		sourceID, sourceConversationID).Scan(&adoptedID)
+	if adoptedErr == nil {
+		return adoptedID, nil
+	}
+	if !errors.Is(adoptedErr, sql.ErrNoRows) {
+		return 0, fmt.Errorf("lookup adopted Gmail thread: %w", adoptedErr)
+	}
 	now := dialect.Now()
 	var id int64
 	err := q.QueryRow(fmt.Sprintf(`
@@ -2876,7 +2902,13 @@ func (s *Store) MarkMessagesDeletedBatch(sourceID int64, sourceMessageIDs []stri
 	}
 	write := func(q chunkQuerier) error {
 		return execInChunks(q, sourceMessageIDs, []any{sourceID},
-			fmt.Sprintf(`UPDATE messages SET deleted_from_source_at = %s WHERE source_id = ? AND source_message_id IN (%%s) AND deleted_from_source_at IS NULL`, s.dialect.Now()))
+			fmt.Sprintf(`UPDATE messages SET deleted_from_source_at = %s
+				WHERE source_id = ? AND source_message_id IN (%%s)
+				AND deleted_from_source_at IS NULL
+				AND NOT EXISTS (
+					SELECT 1 FROM gmail_archive_only_adoption a
+					WHERE a.source_id = messages.source_id
+					AND a.message_id = messages.id)`, s.dialect.Now()))
 	}
 	if s.syncGeneration == nil {
 		return write(s.db)
@@ -2901,11 +2933,14 @@ func (s *Store) ReconcileSourceMessageSnapshot(
 	var missing []string
 	err := s.withTxContext(ctx, func(tx *loggedTx) error {
 		rows, err := tx.QueryContext(ctx, `
-			SELECT source_message_id
-			FROM messages
-			WHERE source_id = ?
-			  AND deleted_at IS NULL
-			  AND deleted_from_source_at IS NULL
+			SELECT m.source_message_id
+			FROM messages m
+			WHERE m.source_id = ?
+			  AND m.deleted_at IS NULL
+			  AND m.deleted_from_source_at IS NULL
+			  AND NOT EXISTS (
+			      SELECT 1 FROM gmail_archive_only_adoption a
+			      WHERE a.source_id = m.source_id AND a.message_id = m.id)
 		`, sourceID)
 		if err != nil {
 			return fmt.Errorf("reconcile source message snapshot: list live messages: %w", err)

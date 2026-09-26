@@ -1116,6 +1116,13 @@ CREATE TABLE IF NOT EXISTS conversations (
     UNIQUE(source_id, source_conversation_id)
 );
 
+CREATE TABLE IF NOT EXISTS gmail_thread_adoption (
+    source_id BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    gmail_thread_id TEXT NOT NULL,
+    conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    PRIMARY KEY (source_id, gmail_thread_id)
+);
+
 CREATE TABLE IF NOT EXISTS conversation_participants (
     conversation_id BIGINT NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
     participant_id BIGINT NOT NULL REFERENCES participants(id) ON DELETE CASCADE,
@@ -1196,6 +1203,11 @@ CREATE TABLE IF NOT EXISTS messages (
     content_changed_at TIMESTAMPTZ,
 
     UNIQUE(source_id, source_message_id)
+);
+
+CREATE TABLE IF NOT EXISTS gmail_archive_only_adoption (
+    message_id BIGINT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    source_id BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE
 );
 
 CREATE TABLE IF NOT EXISTS message_recipients (

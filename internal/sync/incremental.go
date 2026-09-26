@@ -31,6 +31,16 @@ func (s *Syncer) Incremental(ctx context.Context, source *store.Source) (summary
 func (s *Syncer) incremental(
 	ctx context.Context, source *store.Source, execution *store.SyncExecution,
 ) (summary *gmail.SyncSummary, err error) {
+	return s.incrementalWithCompletionMode(ctx, source, execution, false)
+}
+
+// The first history catch-up after in-place adoption must resolve every item
+// before publishing the source cursor. Ordinary incremental runs deliberately
+// keep their existing advance-with-fetch-debt behavior.
+func (s *Syncer) incrementalWithCompletionMode(
+	ctx context.Context, source *store.Source, execution *store.SyncExecution,
+	strictAdoption bool,
+) (summary *gmail.SyncSummary, err error) {
 	startTime := time.Now()
 	summary = &gmail.SyncSummary{StartTime: startTime}
 
@@ -315,6 +325,12 @@ func (s *Syncer) incremental(
 		s.logger.Warn("incremental sync completed with errors",
 			"errors", checkpoint.ErrorsCount,
 			"history_id", historyIDStr)
+		if strictAdoption {
+			err := fmt.Errorf("adoption history catch-up has %d unresolved items",
+				checkpoint.ErrorsCount)
+			s.failStoppedSync(syncID, err)
+			return nil, err
+		}
 	}
 	// Mark sync complete before running best-effort provider maintenance.
 	mailboxChanged := startHistoryID < profile.HistoryID || checkpoint.MessagesAdded > 0
