@@ -243,7 +243,7 @@ func (b *Backend) Search(ctx context.Context, gen vector.GenerationID, queryVec 
 	if err != nil {
 		return nil, err
 	}
-	limit := min(max(k*8, 128), vector.MaxFilterMessageIDs)
+	limit := min(max(k+16, 32), vector.MaxFilterMessageIDs)
 	for {
 		searchCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		matches, err := client.Search(searchCtx, queryVec, limit)
