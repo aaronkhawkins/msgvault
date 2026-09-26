@@ -1,5 +1,6 @@
 // msgvault-qdrant-seed copies existing authoritative vectors into a derived
-// Qdrant collection. It never updates the source SQLite database.
+// Qdrant collection. Its only SQLite writes create the outbox and readiness
+// metadata; embedding and archive rows remain authoritative and untouched.
 package main
 
 import (
@@ -14,9 +15,17 @@ import (
 	"path/filepath"
 	"time"
 
+	"go.kenn.io/msgvault/internal/vector"
 	"go.kenn.io/msgvault/internal/vector/qdrantindex"
 	"go.kenn.io/msgvault/internal/vector/sqlitevec"
 )
+
+type checkpointState struct {
+	SourceID   string `json:"source_id"`
+	Generation int64  `json:"generation_id"`
+	Collection string `json:"collection"`
+	LastID     uint64 `json:"last_id"`
+}
 
 func main() {
 	if err := run(); err != nil {
@@ -26,47 +35,70 @@ func main() {
 }
 
 func run() error {
-	dbPath := flag.String("vectors", "", "read-only vectors.db path")
+	dbPath := flag.String("vectors", "", "vectors.db path")
 	endpoint := flag.String("endpoint", "http://qdrant:6333", "private Qdrant endpoint")
 	prefix := flag.String("collection-prefix", "msgvault", "collection prefix")
 	checkpoint := flag.String("checkpoint", "", "owner-only progress file")
 	reconcileOnly := flag.Bool("reconcile-only", false, "compare point IDs against current SQLite rows and repair the index")
+	initOnly := flag.Bool("init", false, "install the transactional change log before seeding")
 	flag.Parse()
-	if *dbPath == "" || (!*reconcileOnly && *checkpoint == "") {
+	if *dbPath == "" || (!*reconcileOnly && !*initOnly && *checkpoint == "") {
 		return fmt.Errorf("vectors and checkpoint paths are required")
 	}
 	if err := sqlitevec.RegisterExtension(); err != nil {
 		return err
+	}
+	ctx := context.Background()
+	if *initOnly {
+		source, err := sqlitevec.Open(ctx, sqlitevec.Options{Path: *dbPath})
+		if err != nil {
+			return err
+		}
+		defer source.Close()
+		if err := source.EnableQdrantChangeLog(ctx); err != nil {
+			return err
+		}
+		fmt.Println("transactional Qdrant change log installed")
+		return nil
 	}
 	db, err := sql.Open(sqlitevec.DriverName(), "file:"+*dbPath+"?mode=ro")
 	if err != nil {
 		return err
 	}
 	defer db.Close()
-	ctx := context.Background()
 	var gen int64
 	var dim int
 	if err := db.QueryRowContext(ctx, "SELECT id, dimension FROM index_generations WHERE state='active'").Scan(&gen, &dim); err != nil {
 		return err
 	}
+	var sourceID string
+	if err := db.QueryRowContext(ctx, `SELECT source_id FROM qdrant_source WHERE id=1`).Scan(&sourceID); err != nil {
+		return fmt.Errorf("install Qdrant change log first: %w", err)
+	}
 	client, err := qdrantindex.New(*endpoint, qdrantindex.CollectionForGeneration(*prefix, gen))
 	if err != nil {
 		return err
 	}
-	if err := client.EnsureCollection(ctx, dim); err != nil {
+	if err := client.EnsureCollection(ctx, dim, sourceID, gen); err != nil {
 		return err
 	}
 	if *reconcileOnly {
-		return reconcile(ctx, db, client, gen, dim)
+		return reconcile(ctx, db, *dbPath, client, gen, dim, sourceID)
 	}
-	var last uint64
+	checkpointValue := checkpointState{SourceID: sourceID, Generation: gen, Collection: client.CollectionName()}
 	if data, err := os.ReadFile(*checkpoint); err == nil {
-		if err := json.Unmarshal(data, &last); err != nil {
+		var previous checkpointState
+		if err := json.Unmarshal(data, &previous); err != nil {
 			return err
 		}
+		if previous.SourceID != sourceID || previous.Generation != gen || previous.Collection != client.CollectionName() {
+			return fmt.Errorf("checkpoint belongs to another source, generation, or collection")
+		}
+		checkpointValue = previous
 	} else if !os.IsNotExist(err) {
 		return err
 	}
+	last := checkpointValue.LastID
 	// Read vec0's chunk storage by the authoritative embedding rowid. A
 	// virtual-table JOIN without a MATCH constraint scans the whole vector
 	// corpus on every page, so the one-shot loader uses its stable shadow
@@ -134,12 +166,13 @@ func run() error {
 		if len(batch) == 0 {
 			break
 		}
-		if err := client.Upsert(ctx, batch); err != nil {
+		if err := retryWrite(ctx, func() error { return client.Upsert(ctx, batch) }); err != nil {
 			return err
 		}
 		last = batch[len(batch)-1].ID
 		count += len(batch)
-		encoded, _ := json.Marshal(last)
+		checkpointValue.LastID = last
+		encoded, _ := json.Marshal(checkpointValue)
 		tmp := *checkpoint + ".tmp"
 		if err := os.WriteFile(tmp, encoded, 0600); err != nil {
 			return err
@@ -155,11 +188,11 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	fmt.Printf("complete generation=%d indexed_this_run=%d qdrant_count=%d last_id=%d elapsed=%s norm_sample=[%.6f,%.6f] checkpoint=%s\n", gen, count, indexed, last, time.Since(start).Round(time.Second), minNorm, maxNorm, filepath.Base(*checkpoint))
+	fmt.Printf("seed pass complete generation=%d indexed_this_run=%d qdrant_count=%d last_id=%d elapsed=%s norm_sample=[%.6f,%.6f] checkpoint=%s; final reconciliation required\n", gen, count, indexed, last, time.Since(start).Round(time.Second), minNorm, maxNorm, filepath.Base(*checkpoint))
 	return nil
 }
 
-func reconcile(ctx context.Context, db *sql.DB, client *qdrantindex.Client, gen int64, dim int) error {
+func reconcile(ctx context.Context, db *sql.DB, dbPath string, client *qdrantindex.Client, gen int64, dim int, sourceID string) error {
 	indexed := make(map[uint64]bool)
 	var offset *uint64
 	for {
@@ -224,13 +257,13 @@ func reconcile(ctx context.Context, db *sql.DB, client *qdrantindex.Client, gen 
 		}
 		points = append(points, p)
 		if len(points) == 128 {
-			if err := client.Upsert(ctx, points); err != nil {
+			if err := retryWrite(ctx, func() error { return client.Upsert(ctx, points) }); err != nil {
 				return err
 			}
 			points = points[:0]
 		}
 	}
-	if err := client.Upsert(ctx, points); err != nil {
+	if err := retryWrite(ctx, func() error { return client.Upsert(ctx, points) }); err != nil {
 		return err
 	}
 	var extra []uint64
@@ -239,7 +272,7 @@ func reconcile(ctx context.Context, db *sql.DB, client *qdrantindex.Client, gen 
 	}
 	for len(extra) > 0 {
 		n := min(len(extra), 256)
-		if err := client.Delete(ctx, extra[:n]); err != nil {
+		if err := retryWrite(ctx, func() error { return client.Delete(ctx, extra[:n]) }); err != nil {
 			return err
 		}
 		extra = extra[n:]
@@ -248,6 +281,42 @@ func reconcile(ctx context.Context, db *sql.DB, client *qdrantindex.Client, gen 
 	if err != nil {
 		return err
 	}
+	var pending int64
+	if err := db.QueryRowContext(ctx, `SELECT COUNT(*) FROM qdrant_changes`).Scan(&pending); err != nil {
+		return err
+	}
+	if actual != expected && pending == 0 {
+		return fmt.Errorf("Qdrant count differs from authoritative rows after reconciliation")
+	}
+	writer, err := sqlitevec.Open(ctx, sqlitevec.Options{Path: dbPath})
+	if err != nil {
+		return err
+	}
+	if err := writer.MarkQdrantReady(ctx, vector.GenerationID(gen), client.CollectionName(), sourceID); err != nil {
+		writer.Close()
+		return err
+	}
+	if err := writer.Close(); err != nil {
+		return err
+	}
 	fmt.Printf("reconciled generation=%d expected_at_scan=%d missing_repaired=%d extra_deleted=%d qdrant_count=%d\n", gen, expected, len(missing), len(indexed), actual)
 	return nil
+}
+
+func retryWrite(ctx context.Context, write func() error) error {
+	var err error
+	for attempt := 0; attempt < 5; attempt++ {
+		if err = write(); err == nil {
+			return nil
+		}
+		if attempt == 4 {
+			break
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Duration(1<<attempt) * time.Second):
+		}
+	}
+	return err
 }

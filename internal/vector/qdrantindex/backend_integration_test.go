@@ -26,7 +26,6 @@ func TestQdrantIndexPublishesAndRecoversFromFailure(t *testing.T) {
 	prefix := fmt.Sprintf("msgvault_test_%d", time.Now().UnixNano())
 	client, err := New(endpoint, CollectionForGeneration(prefix, 1))
 	require.NoError(t, err)
-	require.NoError(t, client.EnsureCollection(ctx, 4))
 	t.Cleanup(func() { _ = client.request(context.Background(), "DELETE", client.collectionPath(), nil, nil) })
 	dir := t.TempDir()
 	require.NoError(t, sqlitevec.RegisterExtension())
@@ -55,7 +54,27 @@ func TestQdrantIndexPublishesAndRecoversFromFailure(t *testing.T) {
 	backend, err := Wrap(source, mainDB, endpoint, prefix)
 	require.NoError(t, err)
 	require.NoError(t, backend.Start(ctx))
+	sourceID, err := source.QdrantSourceIdentity(ctx)
+	require.NoError(t, err)
+	require.NoError(t, client.EnsureCollection(ctx, 4, sourceID, int64(gen)))
 	unit := func(axis int) []float32 { v := make([]float32, 4); v[axis] = 1; return v }
+	require.NoError(t, backend.Upsert(ctx, gen, []vector.Chunk{{MessageID: 1, Vector: unit(0)}, {MessageID: 2, Vector: unit(1)}}))
+	waitIndex(t, backend, client, 2)
+	require.NoError(t, source.MarkQdrantReady(ctx, gen, client.CollectionName(), sourceID))
+	assert.True(t, backend.indexCurrent(ctx, gen))
+	// Cosine would rank [2,0] ahead of [1,0.1], reversing SQLite L2.
+	require.NoError(t, backend.Upsert(ctx, gen, []vector.Chunk{
+		{MessageID: 1, Vector: []float32{1, 0.1, 0, 0}},
+		{MessageID: 2, Vector: []float32{2, 0, 0, 0}},
+	}))
+	waitIndex(t, backend, client, 2)
+	exact, err := source.Search(ctx, gen, unit(0), 2, vector.Filter{})
+	require.NoError(t, err)
+	nonunit, err := backend.Search(ctx, gen, unit(0), 2, vector.Filter{})
+	require.NoError(t, err)
+	require.Len(t, nonunit, 2)
+	assert.Equal(t, exact[0].MessageID, nonunit[0].MessageID)
+	assert.InDelta(t, exact[0].Score, nonunit[0].Score, 0.0001)
 	require.NoError(t, backend.Upsert(ctx, gen, []vector.Chunk{{MessageID: 1, Vector: unit(0)}, {MessageID: 2, Vector: unit(1)}}))
 	waitIndex(t, backend, client, 2)
 	hits, err := backend.Search(ctx, gen, unit(0), 1, vector.Filter{})

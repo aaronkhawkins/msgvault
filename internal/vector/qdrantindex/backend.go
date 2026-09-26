@@ -7,7 +7,6 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
-	"math"
 	"sync"
 	"time"
 
@@ -96,11 +95,30 @@ func (b *Backend) Status(ctx context.Context) (pending int64, lastError string, 
 	b.mu.RUnlock()
 	if err == nil && pending == 0 && lastError == "" {
 		if gen, genErr := b.ActiveGeneration(ctx); genErr == nil {
+			sourceID, identityErr := b.QdrantSourceIdentity(ctx)
+			if identityErr != nil {
+				return pending, identityErr.Error(), err
+			}
+			client, clientErr := b.client(gen.ID)
+			if clientErr != nil {
+				return pending, clientErr.Error(), err
+			}
+			ready, readyErr := b.QdrantReady(ctx, gen.ID, client.CollectionName(), sourceID)
+			if readyErr != nil {
+				return pending, readyErr.Error(), err
+			}
+			if !ready {
+				return pending, "Qdrant collection has not completed reconciliation", err
+			}
+			checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+			provenanceOK := client.ProvenanceMatches(checkCtx, sourceID, int64(gen.ID))
+			cancel()
+			if !provenanceOK {
+				return pending, "Qdrant collection provenance mismatch or unavailable", err
+			}
 			var expected int64
 			if countErr := b.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM embeddings WHERE generation_id=?`, int64(gen.ID)).Scan(&expected); countErr != nil {
 				lastError = countErr.Error()
-			} else if client, clientErr := b.client(gen.ID); clientErr != nil {
-				lastError = clientErr.Error()
 			} else {
 				checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 				indexed, countErr := client.Count(checkCtx)
@@ -119,6 +137,10 @@ func (b *Backend) Status(ctx context.Context) (pending int64, lastError string, 
 func (b *Backend) drainOnce(ctx context.Context) error {
 	changes, err := b.NextQdrantChanges(ctx, 128)
 	if err != nil || len(changes) == 0 {
+		return err
+	}
+	sourceID, err := b.QdrantSourceIdentity(ctx)
+	if err != nil {
 		return err
 	}
 	byGen := make(map[vector.GenerationID][]sqlitevec.QdrantChange)
@@ -148,7 +170,7 @@ func (b *Backend) drainOnce(ctx context.Context) error {
 			upserts = append(upserts, Point{ID: change.EmbeddingID, MessageID: messageID, ChunkIndex: chunkIndex, Vector: values})
 		}
 		if len(upserts) > 0 {
-			if err := client.EnsureCollection(ctx, len(upserts[0].Vector)); err != nil {
+			if err := client.EnsureCollection(ctx, len(upserts[0].Vector), sourceID, int64(gen)); err != nil {
 				return err
 			}
 			if err := client.Upsert(ctx, upserts); err != nil {
@@ -184,6 +206,19 @@ func (b *Backend) Search(ctx context.Context, gen vector.GenerationID, queryVec 
 		if err != nil {
 			return b.Backend.Search(ctx, gen, queryVec, k, filter)
 		}
+		pointIDs := make([]uint64, len(matches))
+		for i, match := range matches {
+			pointIDs[i] = match.ID
+		}
+		current, err := b.QdrantMessageIDsForEmbeddingIDs(ctx, gen, pointIDs)
+		if err != nil {
+			return nil, err
+		}
+		for _, match := range matches {
+			if current[match.ID] != match.MessageID || match.MessageID == 0 {
+				return b.Backend.Search(ctx, gen, queryVec, k, filter)
+			}
+		}
 		ids := make([]int64, 0, len(matches))
 		seen := make(map[int64]bool, len(matches))
 		for _, match := range matches {
@@ -201,9 +236,9 @@ func (b *Backend) Search(ctx context.Context, gen vector.GenerationID, queryVec 
 			if !allowed[match.MessageID] {
 				continue
 			}
-			// Qdrant's cosine score maps back to the original unit-vector
-			// L2 score used by SQLite; rankings are identical for unit vectors.
-			score := 1 - math.Sqrt(math.Max(0, 2-2*match.Score))
+			// Qdrant Euclid reports L2 distance, matching sqlite-vec's
+			// 1-distance score for vectors of any norm.
+			score := 1 - match.Score
 			hits = append(hits, vector.Hit{MessageID: match.MessageID, Score: score, Rank: len(hits) + 1})
 			allowed[match.MessageID] = false
 			if len(hits) == k {
@@ -233,15 +268,29 @@ func (b *Backend) indexCurrent(ctx context.Context, gen vector.GenerationID) boo
 	if err != nil || pending != 0 {
 		return false
 	}
-	var expected int64
-	if err := b.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM embeddings WHERE generation_id=?`, int64(gen)).Scan(&expected); err != nil {
+	sourceID, err := b.QdrantSourceIdentity(ctx)
+	if err != nil {
 		return false
 	}
 	client, err := b.client(gen)
 	if err != nil {
 		return false
 	}
+	ready, err := b.QdrantReady(ctx, gen, client.CollectionName(), sourceID)
+	if err != nil || !ready {
+		return false
+	}
 	checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	provenanceOK := client.ProvenanceMatches(checkCtx, sourceID, int64(gen))
+	cancel()
+	if !provenanceOK {
+		return false
+	}
+	var expected int64
+	if err := b.DB().QueryRowContext(ctx, `SELECT COUNT(*) FROM embeddings WHERE generation_id=?`, int64(gen)).Scan(&expected); err != nil {
+		return false
+	}
+	checkCtx, cancel = context.WithTimeout(ctx, 2*time.Second)
 	indexed, err := client.Count(checkCtx)
 	cancel()
 	return err == nil && indexed == expected

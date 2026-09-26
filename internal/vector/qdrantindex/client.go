@@ -85,24 +85,45 @@ func (c *Client) request(ctx context.Context, method, path string, body any, res
 
 func (c *Client) collectionPath() string { return "/collections/" + url.PathEscape(c.collection) }
 
-func (c *Client) EnsureCollection(ctx context.Context, dimension int) error {
+type collectionInfo struct {
+	Config struct {
+		Metadata struct {
+			SourceID   string `json:"source_id"`
+			Generation int64  `json:"generation_id"`
+		} `json:"metadata"`
+		Params struct {
+			Vectors struct {
+				Size     int    `json:"size"`
+				Distance string `json:"distance"`
+			} `json:"vectors"`
+		} `json:"params"`
+	} `json:"config"`
+}
+
+func (c *Client) collectionInfo(ctx context.Context) (collectionInfo, error) {
+	var info collectionInfo
+	err := c.request(ctx, http.MethodGet, c.collectionPath(), nil, &info)
+	return info, err
+}
+
+func (c *Client) ProvenanceMatches(ctx context.Context, sourceID string, gen int64) bool {
+	info, err := c.collectionInfo(ctx)
+	return err == nil && info.Config.Metadata.SourceID == sourceID && info.Config.Metadata.Generation == gen &&
+		strings.EqualFold(info.Config.Params.Vectors.Distance, "Euclid")
+}
+
+func (c *Client) EnsureCollection(ctx context.Context, dimension int, sourceID string, gen int64) error {
 	if dimension <= 0 {
 		return errors.New("invalid vector dimension")
 	}
-	var info struct {
-		Config struct {
-			Params struct {
-				Vectors struct {
-					Size     int    `json:"size"`
-					Distance string `json:"distance"`
-				} `json:"vectors"`
-			} `json:"params"`
-		} `json:"config"`
+	if sourceID == "" || gen <= 0 {
+		return errors.New("qdrant source identity and generation are required")
 	}
-	err := c.request(ctx, http.MethodGet, c.collectionPath(), nil, &info)
+	info, err := c.collectionInfo(ctx)
 	if err == nil {
-		if info.Config.Params.Vectors.Size != dimension || !strings.EqualFold(info.Config.Params.Vectors.Distance, "Cosine") {
-			return fmt.Errorf("qdrant collection dimension or metric mismatch")
+		if info.Config.Params.Vectors.Size != dimension || !strings.EqualFold(info.Config.Params.Vectors.Distance, "Euclid") ||
+			info.Config.Metadata.SourceID != sourceID || info.Config.Metadata.Generation != gen {
+			return fmt.Errorf("qdrant collection dimension, metric, or provenance mismatch")
 		}
 		return nil
 	}
@@ -110,8 +131,9 @@ func (c *Client) EnsureCollection(ctx context.Context, dimension int) error {
 		return err
 	}
 	return c.request(ctx, http.MethodPut, c.collectionPath(), map[string]any{
-		"vectors":         map[string]any{"size": dimension, "distance": "Cosine", "on_disk": true},
+		"vectors":         map[string]any{"size": dimension, "distance": "Euclid", "on_disk": true},
 		"on_disk_payload": true,
+		"metadata":        map[string]any{"source_id": sourceID, "generation_id": gen},
 	}, nil)
 }
 

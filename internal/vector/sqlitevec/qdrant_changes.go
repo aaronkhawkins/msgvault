@@ -24,6 +24,16 @@ type QdrantChange struct {
 // inserts and deletes in the same transaction as authoritative embedding rows.
 func (b *Backend) EnableQdrantChangeLog(ctx context.Context) error {
 	_, err := b.db.ExecContext(ctx, `
+		CREATE TABLE IF NOT EXISTS qdrant_source (
+			id INTEGER PRIMARY KEY CHECK(id=1),
+			source_id TEXT NOT NULL
+		);
+		INSERT OR IGNORE INTO qdrant_source(id, source_id) VALUES (1, lower(hex(randomblob(16))));
+		CREATE TABLE IF NOT EXISTS qdrant_ready (
+			generation_id INTEGER PRIMARY KEY,
+			collection_name TEXT NOT NULL,
+			source_id TEXT NOT NULL
+		);
 		CREATE TABLE IF NOT EXISTS qdrant_changes (
 			sequence INTEGER PRIMARY KEY AUTOINCREMENT,
 			generation_id INTEGER NOT NULL,
@@ -37,6 +47,31 @@ func (b *Backend) EnableQdrantChangeLog(ctx context.Context) error {
 			INSERT INTO qdrant_changes(generation_id, embedding_id, deleted) VALUES (OLD.generation_id, OLD.embedding_id, 1);
 		END;
 	`)
+	return err
+}
+
+func (b *Backend) QdrantSourceIdentity(ctx context.Context) (string, error) {
+	var id string
+	err := b.db.QueryRowContext(ctx, `SELECT source_id FROM qdrant_source WHERE id=1`).Scan(&id)
+	return id, err
+}
+
+func (b *Backend) QdrantReady(ctx context.Context, gen vector.GenerationID, collection string, sourceID string) (bool, error) {
+	var exists bool
+	err := b.db.QueryRowContext(ctx, `SELECT EXISTS(SELECT 1 FROM qdrant_ready WHERE generation_id=? AND collection_name=? AND source_id=?)`, int64(gen), collection, sourceID).Scan(&exists)
+	return exists, err
+}
+
+func (b *Backend) MarkQdrantReady(ctx context.Context, gen vector.GenerationID, collection, sourceID string) error {
+	current, err := b.QdrantSourceIdentity(ctx)
+	if err != nil {
+		return err
+	}
+	if current != sourceID {
+		return fmt.Errorf("Qdrant source identity changed")
+	}
+	_, err = b.db.ExecContext(ctx, `INSERT INTO qdrant_ready(generation_id,collection_name,source_id) VALUES(?,?,?)
+		ON CONFLICT(generation_id) DO UPDATE SET collection_name=excluded.collection_name,source_id=excluded.source_id`, int64(gen), collection, sourceID)
 	return err
 }
 
@@ -139,12 +174,12 @@ func (b *Backend) FilterQdrantCandidates(ctx context.Context, candidates []int64
 
 // QdrantMessageIDsForEmbeddingIDs maps a bounded set of current point IDs to
 // their message IDs for reconciliation checks without decoding vectors.
-func (b *Backend) QdrantMessageIDsForEmbeddingIDs(ctx context.Context, ids []uint64) (map[uint64]int64, error) {
+func (b *Backend) QdrantMessageIDsForEmbeddingIDs(ctx context.Context, gen vector.GenerationID, ids []uint64) (map[uint64]int64, error) {
 	encoded, err := json.Marshal(ids)
 	if err != nil {
 		return nil, err
 	}
-	rows, err := b.db.QueryContext(ctx, `SELECT embedding_id, message_id FROM embeddings WHERE embedding_id IN (SELECT value FROM json_each(?))`, string(encoded))
+	rows, err := b.db.QueryContext(ctx, `SELECT embedding_id, message_id FROM embeddings WHERE generation_id=? AND embedding_id IN (SELECT value FROM json_each(?))`, int64(gen), string(encoded))
 	if err != nil {
 		return nil, err
 	}
