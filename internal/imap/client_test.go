@@ -188,17 +188,34 @@ func TestListMailboxesUsesBasicListWithoutSpecialUseCapability(t *testing.T) {
 func TestListMailboxesSkipsGmailNamespaceContainerWithoutNoSelect(t *testing.T) {
 	for _, tc := range []struct {
 		name              string
+		gmailHost         bool
+		secureTransport   bool
 		allMailSpecialUse bool
 		want              []string
 	}{
 		{
 			name:              "Gmail All Mail child proves namespace container",
+			gmailHost:         true,
+			secureTransport:   true,
 			allMailSpecialUse: true,
 			want:              []string{"INBOX", "[Gmail]/All Mail", "Projects", "Projects/Current"},
 		},
 		{
-			name: "without Gmail All Mail special use parent remains selectable",
-			want: []string{"INBOX", "[Gmail]", "[Gmail]/All Mail", "Projects", "Projects/Current"},
+			name:              "other provider keeps a selectable parent",
+			allMailSpecialUse: true,
+			want:              []string{"INBOX", "[Gmail]", "[Gmail]/All Mail", "Projects", "Projects/Current"},
+		},
+		{
+			name:            "without Gmail All Mail special use parent remains selectable",
+			gmailHost:       true,
+			secureTransport: true,
+			want:            []string{"INBOX", "[Gmail]", "[Gmail]/All Mail", "Projects", "Projects/Current"},
+		},
+		{
+			name:              "plain connection cannot prove Gmail host",
+			gmailHost:         true,
+			allMailSpecialUse: true,
+			want:              []string{"INBOX", "[Gmail]", "[Gmail]/All Mail", "Projects", "Projects/Current"},
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -237,6 +254,12 @@ func TestListMailboxesSkipsGmailNamespaceContainerWithoutNoSelect(t *testing.T) 
 
 			var mailboxes []string
 			err = client.withConn(t.Context(), func(*imapclient.Client) error {
+				if tc.gmailHost {
+					// The fixture is local; the live connection is already
+					// established before the provider identity is applied.
+					client.config.Host = "imap.gmail.com"
+				}
+				client.config.TLS = tc.secureTransport
 				var listErr error
 				mailboxes, listErr = client.listMailboxesLocked()
 				return listErr
