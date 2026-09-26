@@ -3,6 +3,8 @@ package qdrantindex
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -90,6 +92,7 @@ type collectionInfo struct {
 		Metadata struct {
 			SourceID   string `json:"source_id"`
 			Generation int64  `json:"generation_id"`
+			BootID     string `json:"boot_id"`
 		} `json:"metadata"`
 		Params struct {
 			Vectors struct {
@@ -106,10 +109,34 @@ func (c *Client) collectionInfo(ctx context.Context) (collectionInfo, error) {
 	return info, err
 }
 
-func (c *Client) ProvenanceMatches(ctx context.Context, sourceID string, gen int64) bool {
+func (c *Client) ProvenanceMatches(ctx context.Context, sourceID string, gen int64, bootID string) bool {
 	info, err := c.collectionInfo(ctx)
 	return err == nil && info.Config.Metadata.SourceID == sourceID && info.Config.Metadata.Generation == gen &&
-		strings.EqualFold(info.Config.Params.Vectors.Distance, "Euclid")
+		info.Config.Metadata.BootID == bootID && bootID != "" && strings.EqualFold(info.Config.Params.Vectors.Distance, "Euclid")
+}
+
+// RotateBootID changes the independent Qdrant marker before SQLite records
+// the same value. A crash between those writes leaves search safely on SQLite.
+func (c *Client) RotateBootID(ctx context.Context, sourceID string, gen int64) (string, error) {
+	info, err := c.collectionInfo(ctx)
+	if err != nil {
+		return "", err
+	}
+	if info.Config.Metadata.SourceID != sourceID || info.Config.Metadata.Generation != gen ||
+		!strings.EqualFold(info.Config.Params.Vectors.Distance, "Euclid") {
+		return "", fmt.Errorf("qdrant collection provenance mismatch")
+	}
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", err
+	}
+	bootID := hex.EncodeToString(nonce[:])
+	if err := c.request(ctx, http.MethodPatch, c.collectionPath(), map[string]any{
+		"metadata": map[string]any{"boot_id": bootID},
+	}, nil); err != nil {
+		return "", err
+	}
+	return bootID, nil
 }
 
 func (c *Client) EnsureCollection(ctx context.Context, dimension int, sourceID string, gen int64) error {

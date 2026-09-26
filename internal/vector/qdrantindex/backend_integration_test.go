@@ -61,7 +61,15 @@ func TestQdrantIndexPublishesAndRecoversFromFailure(t *testing.T) {
 	require.NoError(t, backend.Upsert(ctx, gen, []vector.Chunk{{MessageID: 1, Vector: unit(0)}, {MessageID: 2, Vector: unit(1)}}))
 	waitIndex(t, backend, client, 2)
 	require.NoError(t, source.MarkQdrantReady(ctx, gen, client.CollectionName(), sourceID))
+	bootID, err := client.RotateBootID(ctx, sourceID, int64(gen))
+	require.NoError(t, err)
+	require.NoError(t, source.SetQdrantBootID(ctx, gen, client.CollectionName(), sourceID, bootID))
 	assert.True(t, backend.indexCurrent(ctx, gen))
+	// An older SQLite snapshot would carry an older marker. A mismatch
+	// rejects the collection even when its point count is still equal.
+	require.NoError(t, source.SetQdrantBootID(ctx, gen, client.CollectionName(), sourceID, "stale"))
+	assert.False(t, backend.indexCurrent(ctx, gen))
+	require.NoError(t, source.SetQdrantBootID(ctx, gen, client.CollectionName(), sourceID, bootID))
 	// Cosine would rank [2,0] ahead of [1,0.1], reversing SQLite L2.
 	require.NoError(t, backend.Upsert(ctx, gen, []vector.Chunk{
 		{MessageID: 1, Vector: []float32{1, 0.1, 0, 0}},

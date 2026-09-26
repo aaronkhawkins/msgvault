@@ -32,7 +32,8 @@ func (b *Backend) EnableQdrantChangeLog(ctx context.Context) error {
 		CREATE TABLE IF NOT EXISTS qdrant_ready (
 			generation_id INTEGER PRIMARY KEY,
 			collection_name TEXT NOT NULL,
-			source_id TEXT NOT NULL
+			source_id TEXT NOT NULL,
+			boot_id TEXT NOT NULL DEFAULT ''
 		);
 		CREATE TABLE IF NOT EXISTS qdrant_changes (
 			sequence INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -47,7 +48,14 @@ func (b *Backend) EnableQdrantChangeLog(ctx context.Context) error {
 			INSERT INTO qdrant_changes(generation_id, embedding_id, deleted) VALUES (OLD.generation_id, OLD.embedding_id, 1);
 		END;
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+	_, err = b.db.ExecContext(ctx, `ALTER TABLE qdrant_ready ADD COLUMN boot_id TEXT NOT NULL DEFAULT ''`)
+	if err != nil && !isDuplicateColumnErr(err) {
+		return err
+	}
+	return nil
 }
 
 func (b *Backend) QdrantSourceIdentity(ctx context.Context) (string, error) {
@@ -62,6 +70,27 @@ func (b *Backend) QdrantReady(ctx context.Context, gen vector.GenerationID, coll
 	return exists, err
 }
 
+func (b *Backend) QdrantBootID(ctx context.Context, gen vector.GenerationID, collection, sourceID string) (string, error) {
+	var id string
+	err := b.db.QueryRowContext(ctx, `SELECT boot_id FROM qdrant_ready WHERE generation_id=? AND collection_name=? AND source_id=?`, int64(gen), collection, sourceID).Scan(&id)
+	return id, err
+}
+
+func (b *Backend) SetQdrantBootID(ctx context.Context, gen vector.GenerationID, collection, sourceID, bootID string) error {
+	result, err := b.db.ExecContext(ctx, `UPDATE qdrant_ready SET boot_id=? WHERE generation_id=? AND collection_name=? AND source_id=?`, bootID, int64(gen), collection, sourceID)
+	if err != nil {
+		return err
+	}
+	changed, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if changed != 1 {
+		return fmt.Errorf("Qdrant readiness row changed")
+	}
+	return nil
+}
+
 func (b *Backend) MarkQdrantReady(ctx context.Context, gen vector.GenerationID, collection, sourceID string) error {
 	current, err := b.QdrantSourceIdentity(ctx)
 	if err != nil {
@@ -70,8 +99,8 @@ func (b *Backend) MarkQdrantReady(ctx context.Context, gen vector.GenerationID, 
 	if current != sourceID {
 		return fmt.Errorf("Qdrant source identity changed")
 	}
-	_, err = b.db.ExecContext(ctx, `INSERT INTO qdrant_ready(generation_id,collection_name,source_id) VALUES(?,?,?)
-		ON CONFLICT(generation_id) DO UPDATE SET collection_name=excluded.collection_name,source_id=excluded.source_id`, int64(gen), collection, sourceID)
+	_, err = b.db.ExecContext(ctx, `INSERT INTO qdrant_ready(generation_id,collection_name,source_id,boot_id) VALUES(?,?,?,'')
+		ON CONFLICT(generation_id) DO UPDATE SET collection_name=excluded.collection_name,source_id=excluded.source_id,boot_id=''`, int64(gen), collection, sourceID)
 	return err
 }
 

@@ -296,6 +296,15 @@ func reconcile(ctx context.Context, db *sql.DB, dbPath string, client *qdrantind
 		writer.Close()
 		return err
 	}
+	bootID, err := client.RotateBootID(ctx, sourceID, gen)
+	if err != nil {
+		writer.Close()
+		return err
+	}
+	if err := writer.SetQdrantBootID(ctx, vector.GenerationID(gen), client.CollectionName(), sourceID, bootID); err != nil {
+		writer.Close()
+		return err
+	}
 	if err := writer.Close(); err != nil {
 		return err
 	}

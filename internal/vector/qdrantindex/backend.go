@@ -50,6 +50,10 @@ func (b *Backend) Start(ctx context.Context) error {
 	if b.done != nil {
 		return nil
 	}
+	// Rotate the marker stored outside vectors.db on every writable startup.
+	// Restoring an older SQLite snapshot restores its former marker, while
+	// Qdrant retains the newer one, so an equal-count stale index cannot pass.
+	_ = b.rotateBootID(ctx)
 	workerCtx, cancel := context.WithCancel(context.Background())
 	b.cancel = cancel
 	b.done = make(chan struct{})
@@ -75,6 +79,41 @@ func (b *Backend) Start(ctx context.Context) error {
 		}
 	}()
 	return nil
+}
+
+func (b *Backend) rotateBootID(ctx context.Context) error {
+	gen, err := b.ActiveGeneration(ctx)
+	if err != nil {
+		return err
+	}
+	sourceID, err := b.QdrantSourceIdentity(ctx)
+	if err != nil {
+		return err
+	}
+	client, err := b.client(gen.ID)
+	if err != nil {
+		return err
+	}
+	bootID, err := b.QdrantBootID(ctx, gen.ID, client.CollectionName(), sourceID)
+	if err != nil {
+		return err
+	}
+	checkCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	valid := client.ProvenanceMatches(checkCtx, sourceID, int64(gen.ID), bootID)
+	cancel()
+	if !valid {
+		return errors.New("Qdrant boot marker mismatch; reconcile the derived index")
+	}
+	if err := b.SetQdrantBootID(ctx, gen.ID, client.CollectionName(), sourceID, ""); err != nil {
+		return err
+	}
+	rotateCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	newID, err := client.RotateBootID(rotateCtx, sourceID, int64(gen.ID))
+	cancel()
+	if err != nil {
+		return err
+	}
+	return b.SetQdrantBootID(ctx, gen.ID, client.CollectionName(), sourceID, newID)
 }
 
 func (b *Backend) Close() error {
@@ -110,8 +149,12 @@ func (b *Backend) Status(ctx context.Context) (pending int64, lastError string, 
 			if !ready {
 				return pending, "Qdrant collection has not completed reconciliation", err
 			}
+			bootID, bootErr := b.QdrantBootID(ctx, gen.ID, client.CollectionName(), sourceID)
+			if bootErr != nil {
+				return pending, bootErr.Error(), err
+			}
 			checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-			provenanceOK := client.ProvenanceMatches(checkCtx, sourceID, int64(gen.ID))
+			provenanceOK := client.ProvenanceMatches(checkCtx, sourceID, int64(gen.ID), bootID)
 			cancel()
 			if !provenanceOK {
 				return pending, "Qdrant collection provenance mismatch or unavailable", err
@@ -280,8 +323,12 @@ func (b *Backend) indexCurrent(ctx context.Context, gen vector.GenerationID) boo
 	if err != nil || !ready {
 		return false
 	}
+	bootID, err := b.QdrantBootID(ctx, gen, client.CollectionName(), sourceID)
+	if err != nil {
+		return false
+	}
 	checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
-	provenanceOK := client.ProvenanceMatches(checkCtx, sourceID, int64(gen))
+	provenanceOK := client.ProvenanceMatches(checkCtx, sourceID, int64(gen), bootID)
 	cancel()
 	if !provenanceOK {
 		return false
