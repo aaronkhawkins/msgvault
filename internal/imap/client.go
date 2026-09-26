@@ -1183,6 +1183,7 @@ func (c *Client) buildMessageListCache(ctx context.Context) error {
 	}
 
 	qresyncFallback := false
+	condstoreFallback := false
 	if trackFolders {
 		requireQresync := !c.forceFullEnumeration &&
 			!c.labelsSnapshotFilteredLocked() &&
@@ -1208,15 +1209,37 @@ func (c *Client) buildMessageListCache(ctx context.Context) error {
 			c.observedFolderStates = make(map[string]FolderState, len(allMailboxes))
 			folderStatuses = c.observeFolderStates(ctx, allMailboxes)
 			qresyncFallback = true
-		case requireQresync && !handled:
-			// Ineligible rather than failed. tryBuildQresyncMessageList returns
-			// before issuing a command when no mailbox carries a mod-sequence
-			// baseline, so the connection, the mailbox plan and the STATUS
-			// results all still stand. A server that never reports a
-			// mod-sequence takes this path on every run, where reconnecting
-			// would redial and re-STATUS every mailbox to discard nothing.
-			c.logger.Info("QRESYNC unavailable, enumerating fully")
-			qresyncFallback = true
+		case !handled:
+			condstoreHandled, condstoreErr := c.tryBuildCondstoreMessageList(ctx, allMailboxes, folderStatuses)
+			if condstoreErr != nil {
+				c.logger.Warn("CONDSTORE failed, reconnecting for full enumeration", "error", condstoreErr)
+				c.observedMailboxDeltas = nil
+				c.observedFolderStates = make(map[string]FolderState, len(allMailboxes))
+				c.messageListCache = nil
+				c.clearFolderAcknowledgements()
+				if reconErr := c.reconnect(ctx); reconErr != nil {
+					return fmt.Errorf("reconnect after CONDSTORE failure: %w", reconErr)
+				}
+				c.clearMailboxDiscoveryLocked()
+				if listErr := buildMailboxPlan(); listErr != nil {
+					return fmt.Errorf("LIST after CONDSTORE fallback: %w", listErr)
+				}
+				c.observedFolderStates = make(map[string]FolderState, len(allMailboxes))
+				folderStatuses = c.observeFolderStates(ctx, allMailboxes)
+				qresyncFallback = true
+				condstoreFallback = true
+			} else if condstoreHandled {
+				return nil
+			} else if requireQresync {
+				// Ineligible rather than failed. tryBuildQresyncMessageList returns
+				// before issuing a command when no mailbox carries a mod-sequence
+				// baseline, so the connection, the mailbox plan and the STATUS
+				// results all still stand. A server that never reports a
+				// mod-sequence takes this path on every run, where reconnecting
+				// would redial and re-STATUS every mailbox to discard nothing.
+				c.logger.Info("QRESYNC unavailable, enumerating fully")
+				qresyncFallback = true
+			}
 		case handled:
 			return nil
 		}
@@ -1336,6 +1359,13 @@ func (c *Client) buildMessageListCache(ctx context.Context) error {
 				return false
 			}
 			knownUIDs = uidsToUint32(uids)
+		}
+		if condstoreFallback && canTrackFolder &&
+			!statusMessageCount(trackState, len(knownUIDs)) {
+			// A failed incremental search may have returned an incomplete UID
+			// set. The fallback must not retire memberships unless its own
+			// enumeration agrees with a fresh STATUS count.
+			return false
 		}
 		if observed != nil {
 			observed.KnownUIDs = knownUIDs

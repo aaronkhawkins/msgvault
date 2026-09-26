@@ -670,6 +670,77 @@ func TestIMAPQresyncEndToEndAppend(t *testing.T) {
 	assertions.NotContains(commands, "UID SEARCH")
 }
 
+func TestIMAPCondstoreEndToEndGmailAllAndLabels(t *testing.T) {
+	const capabilities = "IMAP4rev1 ENABLE CONDSTORE SPECIAL-USE"
+	all := scriptedRFC7162Mailbox{
+		Name: "[Gmail]/All Mail", Attrs: []imapapi.MailboxAttr{imapapi.MailboxAttrAll},
+		UIDValidity: 77, UIDNext: 2, HighestModSeq: 1,
+		Messages: []scriptedRFC7162Message{newScriptedRFC7162Message(1, "shared@example.test")},
+	}
+	project := scriptedRFC7162Mailbox{
+		Name: "Project", UIDValidity: 88, UIDNext: 2, HighestModSeq: 1,
+		Messages: []scriptedRFC7162Message{newScriptedRFC7162Message(1, "shared@example.test")},
+	}
+	addr, server := startScriptedRFC7162Server(t, scriptedRFC7162Snapshot{
+		Capabilities: capabilities, Mailboxes: []scriptedRFC7162Mailbox{project, all},
+	})
+	st := testutil.NewTestStore(t)
+	const identifier = "imap://condstore@example.test"
+	first, source := requireScriptedRFC7162Sync(t, st, identifier, addr)
+	require.NoError(t, first.Close())
+
+	all.UIDNext = 3
+	all.HighestModSeq = 2
+	all.Messages = append(all.Messages, newScriptedRFC7162Message(2, "new@example.test"))
+	all.ChangedUIDs = []imapapi.UID{2}
+	project.HighestModSeq = 2
+	project.Messages[0].Flags = []imapapi.Flag{imapapi.FlagSeen}
+	project.Messages[0].ModSeq = 2
+	project.ChangedUIDs = []imapapi.UID{1}
+	server.setSnapshot(scriptedRFC7162Snapshot{
+		Capabilities: capabilities, Mailboxes: []scriptedRFC7162Mailbox{project, all},
+	})
+	second, _ := requireScriptedRFC7162Sync(t, st, identifier, addr)
+	require.NoError(t, second.Close())
+	known, err := st.GetIMAPKnownUIDs(source.ID)
+	require.NoError(t, err)
+	assert.Equal(t, map[string][]uint32{
+		"Project": {1}, "[Gmail]/All Mail": {1, 2},
+	}, known)
+	assert.Equal(t, []string{
+		"Project|1|[\"\\\\Seen\"]", "[Gmail]/All Mail|1|[]", "[Gmail]/All Mail|2|[]",
+	}, queryScriptedRFC7162Memberships(t, st, source.ID))
+	assert.Contains(t, queryScriptedRFC7162MessageLabels(t, st, source.ID, "shared@example.test"), "Project")
+	commands := server.commandsFor(2)
+	assert.Contains(t, commands, "CHANGEDSINCE 1")
+	assert.Contains(t, commands, "UID SEARCH UID 1:*")
+	assert.NotContains(t, commands, "VANISHED")
+
+	// Removing the Project copy and replacing the All Mail copy keeps the
+	// message count unchanged in both mailboxes. UID membership still wins.
+	project.Messages = nil
+	project.HighestModSeq = 3
+	project.ChangedUIDs = nil
+	all.UIDNext = 4
+	all.HighestModSeq = 3
+	all.Messages = []scriptedRFC7162Message{
+		newScriptedRFC7162Message(1, "shared@example.test"),
+		newScriptedRFC7162Message(3, "replacement@example.test"),
+	}
+	all.ChangedUIDs = []imapapi.UID{3}
+	server.setSnapshot(scriptedRFC7162Snapshot{
+		Capabilities: capabilities, Mailboxes: []scriptedRFC7162Mailbox{project, all},
+	})
+	third, _ := requireScriptedRFC7162Sync(t, st, identifier, addr)
+	require.NoError(t, third.Close())
+	known, err = st.GetIMAPKnownUIDs(source.ID)
+	require.NoError(t, err)
+	assert.Equal(t, map[string][]uint32{
+		"Project": {}, "[Gmail]/All Mail": {1, 3},
+	}, known)
+	assert.NotContains(t, queryScriptedRFC7162MessageLabels(t, st, source.ID, "shared@example.test"), "Project")
+}
+
 func TestIMAPQresyncEndToEndRetiresChangedMailboxTopology(t *testing.T) {
 	t.Run("deleted mailbox removes cursor and tombstones last membership", func(t *testing.T) {
 		requirements := require.New(t)

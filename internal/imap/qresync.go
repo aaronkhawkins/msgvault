@@ -110,7 +110,15 @@ func (c *Client) tryBuildQresyncMessageList(
 	if !c.enableQresync() {
 		return false, nil
 	}
+	return true, c.buildIncrementalMessageList(ctx, mailboxes, func(mailbox string) (MailboxDelta, error) {
+		return c.collectQresyncMailbox(ctx, mailbox, c.priorFolderStates[mailbox])
+	})
+}
 
+func (c *Client) buildIncrementalMessageList(
+	ctx context.Context, mailboxes []string,
+	collect func(string) (MailboxDelta, error),
+) error {
 	c.observedFolderStates = make(map[string]FolderState, len(mailboxes))
 	c.observedMailboxDeltas = make([]MailboxDelta, 0, len(mailboxes))
 	var messages []gmailapi.MessageID
@@ -121,13 +129,11 @@ func (c *Client) tryBuildQresyncMessageList(
 	}
 	for i, mailbox := range mailboxes {
 		if err := ctx.Err(); err != nil {
-			return false, err
+			return err
 		}
-		prior := c.priorFolderStates[mailbox]
-		var delta MailboxDelta
-		delta, err := c.collectQresyncMailbox(ctx, mailbox, prior)
+		delta, err := collect(mailbox)
 		if err != nil {
-			return false, err
+			return err
 		}
 		if len(delta.ChangedUIDs) == 0 && len(delta.VanishedUIDs) == 0 {
 			unchanged++
@@ -150,7 +156,7 @@ func (c *Client) tryBuildQresyncMessageList(
 	c.messageListCache = messages
 	c.activeSourceAliases = activeSourceAliases
 	c.labelMapComplete = true
-	return true, nil
+	return nil
 }
 
 func (c *Client) collectQresyncMailbox(
