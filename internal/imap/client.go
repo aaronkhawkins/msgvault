@@ -1183,6 +1183,7 @@ func (c *Client) buildMessageListCache(ctx context.Context) error {
 	}
 
 	qresyncFallback := false
+	condstoreFallback := false
 	if trackFolders {
 		requireQresync := !c.forceFullEnumeration &&
 			!c.labelsSnapshotFilteredLocked() &&
@@ -1208,15 +1209,37 @@ func (c *Client) buildMessageListCache(ctx context.Context) error {
 			c.observedFolderStates = make(map[string]FolderState, len(allMailboxes))
 			folderStatuses = c.observeFolderStates(ctx, allMailboxes)
 			qresyncFallback = true
-		case requireQresync && !handled:
-			// Ineligible rather than failed. tryBuildQresyncMessageList returns
-			// before issuing a command when no mailbox carries a mod-sequence
-			// baseline, so the connection, the mailbox plan and the STATUS
-			// results all still stand. A server that never reports a
-			// mod-sequence takes this path on every run, where reconnecting
-			// would redial and re-STATUS every mailbox to discard nothing.
-			c.logger.Info("QRESYNC unavailable, enumerating fully")
-			qresyncFallback = true
+		case !handled:
+			condstoreHandled, condstoreErr := c.tryBuildCondstoreMessageList(ctx, allMailboxes, folderStatuses)
+			if condstoreErr != nil {
+				c.logger.Warn("CONDSTORE failed, reconnecting for full enumeration", "error", condstoreErr)
+				c.observedMailboxDeltas = nil
+				c.observedFolderStates = make(map[string]FolderState, len(allMailboxes))
+				c.messageListCache = nil
+				c.clearFolderAcknowledgements()
+				if reconErr := c.reconnect(ctx); reconErr != nil {
+					return fmt.Errorf("reconnect after CONDSTORE failure: %w", reconErr)
+				}
+				c.clearMailboxDiscoveryLocked()
+				if listErr := buildMailboxPlan(); listErr != nil {
+					return fmt.Errorf("LIST after CONDSTORE fallback: %w", listErr)
+				}
+				c.observedFolderStates = make(map[string]FolderState, len(allMailboxes))
+				folderStatuses = c.observeFolderStates(ctx, allMailboxes)
+				qresyncFallback = true
+				condstoreFallback = true
+			} else if condstoreHandled {
+				return nil
+			} else if requireQresync {
+				// Ineligible rather than failed. tryBuildQresyncMessageList returns
+				// before issuing a command when no mailbox carries a mod-sequence
+				// baseline, so the connection, the mailbox plan and the STATUS
+				// results all still stand. A server that never reports a
+				// mod-sequence takes this path on every run, where reconnecting
+				// would redial and re-STATUS every mailbox to discard nothing.
+				c.logger.Info("QRESYNC unavailable, enumerating fully")
+				qresyncFallback = true
+			}
 		case handled:
 			return nil
 		}
@@ -1407,6 +1430,14 @@ func (c *Client) buildMessageListCache(ctx context.Context) error {
 	}
 	statusesComplete := folderStatusesCoverMailboxes(allMailboxes, folderStatuses)
 	authoritativeSnapshot := trackFolders && !c.labelsSnapshotFilteredLocked()
+	if authoritativeSnapshot && condstoreFallback &&
+		!fallbackMailboxCountsMatch(allMailboxes, folderStatuses,
+			c.observedMailboxDeltas, c.observedMemberships) {
+		// The fallback may have received an incomplete UID SEARCH in any
+		// mailbox, including a label mailbox that buildLabelMap enumerated but
+		// listOne never visits. A partial snapshot must not retire memberships.
+		enumerationComplete = false
+	}
 	if authoritativeSnapshot && (!statusesComplete || !labelMapComplete || !enumerationComplete) {
 		labelMapComplete = false
 		c.observedFolderStates = nil
@@ -1472,6 +1503,36 @@ func (c *Client) buildMessageListCache(ctx context.Context) error {
 	c.activeSourceAliases = activeSourceAliases
 	c.labelMapComplete = labelMapComplete && enumerationComplete
 	return nil
+}
+
+func fallbackMailboxCountsMatch(
+	mailboxes []string, statuses map[string]FolderState,
+	deltas []MailboxDelta, observations []MembershipObservation,
+) bool {
+	knownByMailbox := make(map[string]int, len(deltas))
+	for _, delta := range deltas {
+		knownByMailbox[delta.Mailbox] = len(delta.State.KnownUIDs)
+	}
+	observedByMailbox := make(map[string]map[uint32]struct{})
+	for _, observation := range observations {
+		if observation.UIDValidity != statuses[observation.Mailbox].UIDValidity {
+			continue
+		}
+		if observedByMailbox[observation.Mailbox] == nil {
+			observedByMailbox[observation.Mailbox] = make(map[uint32]struct{})
+		}
+		observedByMailbox[observation.Mailbox][observation.UID] = struct{}{}
+	}
+	for _, mailbox := range mailboxes {
+		count, listed := knownByMailbox[mailbox]
+		if !listed {
+			count = len(observedByMailbox[mailbox])
+		}
+		if !statusMessageCount(statuses[mailbox], count) {
+			return false
+		}
+	}
+	return true
 }
 
 // deltasCoverMailboxes reports whether every current mailbox appears in the

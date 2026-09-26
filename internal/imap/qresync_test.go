@@ -708,12 +708,12 @@ func TestListMessagesToleratesBoundaryUIDAboveHighWaterMark(t *testing.T) {
 	assert.Contains(joinedCommands(server.commandsFor(1)), "UID SEARCH UID 3:*")
 }
 
-// TestListMessagesCondStoreOnlyFlagChangeForcesFullEnumeration covers a server
+// TestListMessagesCondStoreOnlyFlagChangeUsesDelta covers a server
 // that advertises CONDSTORE but not QRESYNC. A flags-only change advances
 // HIGHESTMODSEQ while UIDNEXT and the message count both stay put, so the
 // UIDNEXT high water mark alone would never look at the modified message. The
 // mod-sequence is the signal that something below the mark moved.
-func TestListMessagesCondStoreOnlyFlagChangeForcesFullEnumeration(t *testing.T) {
+func TestListMessagesCondStoreOnlyFlagChangeUsesDelta(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
 
@@ -726,6 +726,7 @@ func TestListMessagesCondStoreOnlyFlagChangeForcesFullEnumeration(t *testing.T) 
 		numMessages:   &numMessages,
 		highestModSeq: 20, // a flag changed on an existing message
 		searchUIDs:    []imapv2.UID{1, 2},
+		fetchChanged:  []imapv2.UID{2},
 	})
 
 	client := newQresyncTestClient(t, addr, map[string]FolderState{
@@ -737,18 +738,20 @@ func TestListMessagesCondStoreOnlyFlagChangeForcesFullEnumeration(t *testing.T) 
 		},
 	})
 
-	assert.Equal([]string{"INBOX|1", "INBOX|2"}, listQresyncMessages(t, client),
-		"an advanced mod-sequence must re-read the mailbox, not just its tail")
+	assert.Equal([]string{"INBOX|2"}, listQresyncMessages(t, client))
 
 	deltas := client.ObservedMailboxDeltas()
 	require.Len(deltas, 1)
-	assert.True(deltas[0].Reset,
-		"a flags-only change is invisible to UIDNEXT and the message count")
+	assert.True(deltas[0].Incremental)
+	assert.False(deltas[0].Reset)
+	assert.Equal([]imapv2.UID{2}, deltas[0].ChangedUIDs)
 	assert.Equal(uint64(20), deltas[0].State.HighestModSeq)
 
 	commands := joinedCommands(server.commandsFor(1))
 	assert.Contains(commands, "UID SEARCH UID 1:*")
-	assert.NotContains(commands, "UID SEARCH UID 3:*")
+	assert.Contains(commands, "UID SEARCH UID 3:*")
+	assert.Contains(commands, "CHANGEDSINCE 10")
+	assert.NotContains(commands, "VANISHED")
 }
 
 // TestListMessagesIneligibleQresyncReusesConnection covers a server that never
