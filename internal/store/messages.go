@@ -2902,7 +2902,13 @@ func (s *Store) MarkMessagesDeletedBatch(sourceID int64, sourceMessageIDs []stri
 	}
 	write := func(q chunkQuerier) error {
 		return execInChunks(q, sourceMessageIDs, []any{sourceID},
-			fmt.Sprintf(`UPDATE messages SET deleted_from_source_at = %s WHERE source_id = ? AND source_message_id IN (%%s) AND deleted_from_source_at IS NULL`, s.dialect.Now()))
+			fmt.Sprintf(`UPDATE messages SET deleted_from_source_at = %s
+				WHERE source_id = ? AND source_message_id IN (%%s)
+				AND deleted_from_source_at IS NULL
+				AND NOT EXISTS (
+					SELECT 1 FROM gmail_archive_only_adoption a
+					WHERE a.source_id = messages.source_id
+					AND a.message_id = messages.id)`, s.dialect.Now()))
 	}
 	if s.syncGeneration == nil {
 		return write(s.db)

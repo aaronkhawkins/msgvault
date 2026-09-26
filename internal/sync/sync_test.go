@@ -2384,6 +2384,35 @@ func TestGmailAdoptionIncludesPreBoundarySpamAndTrash(t *testing.T) {
 	requirements.Positive(api.SnapshotListCalls)
 }
 
+func TestGmailAdoptionPreservesArchiveOnlyMessageDeletedDuringListing(t *testing.T) {
+	requirements := require.New(t)
+	env := newTestEnv(t)
+	seedMessages(env, 2, 1000, "provider-present", "deleted-during-listing")
+	runFullSync(t, env)
+	source, err := env.Store.GetSourceByIdentifier(testEmail)
+	requirements.NoError(err)
+	markSyntheticGmailAdoption(t, env, source.ID)
+	requirements.NoError(env.Store.UpdateSourceSyncCursor(source.ID, ""))
+	source, err = env.Store.GetSourceByID(source.ID)
+	requirements.NoError(err)
+	delete(env.Mock.Messages, "deleted-during-listing")
+	env.Mock.MessagePages = [][]string{{"provider-present"}}
+	env.Mock.HistoryRecords = []gmail.HistoryRecord{historyDeleted("deleted-during-listing")}
+	env.Mock.Profile.HistoryID = 2000
+	env.Mock.HistoryID = 2000
+	syncer := New(&recoveryProfileSequenceAPI{
+		MockAPI: env.Mock, historyIDs: []uint64{1500, 2000},
+	}, env.Store, nil)
+
+	_, err = syncer.IncrementalWithHistoryRecovery(env.Context, source, nil)
+	requirements.NoError(err)
+	assertDeletedFromSource(t, env.Store, "deleted-during-listing", false)
+	assertRawDataExists(t, env.Store, "deleted-during-listing")
+	refreshed, err := env.Store.GetSourceByID(source.ID)
+	requirements.NoError(err)
+	requirements.Equal("2000", refreshed.SyncCursor.String)
+}
+
 func TestGmailAdoptionFailedReconciliationLeavesCursorEmpty(t *testing.T) {
 	requirements := require.New(t)
 	env := newTestEnv(t)
