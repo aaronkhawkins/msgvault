@@ -2462,6 +2462,45 @@ func TestGmailAdoptionCatchupFailureKeepsCursorEmptyAndReusesCompletedListing(t 
 	requirements.Equal("2000", refreshed.SyncCursor.String)
 }
 
+func TestGmailAdoptionCatchupItemFailureKeepsCursorEmpty(t *testing.T) {
+	requirements := require.New(t)
+	env := newTestEnv(t)
+	seedMessages(env, 1, 1000, "already-archived")
+	runFullSync(t, env)
+	source, err := env.Store.GetSourceByIdentifier(testEmail)
+	requirements.NoError(err)
+	markSyntheticGmailAdoption(t, env, source.ID)
+	requirements.NoError(env.Store.UpdateSourceSyncCursor(source.ID, ""))
+	source, err = env.Store.GetSourceByID(source.ID)
+	requirements.NoError(err)
+	env.Mock.AddMessage("arrived-during-listing", testMIME(), []string{"INBOX"})
+	env.Mock.MessagePages = [][]string{{"already-archived"}}
+	env.Mock.HistoryRecords = []gmail.HistoryRecord{historyAdded("arrived-during-listing")}
+	env.Mock.Profile.HistoryID = 2000
+	env.Mock.HistoryID = 2000
+	env.Mock.GetMessageError["arrived-during-listing"] = errors.New("synthetic item fetch failure")
+	syncer := New(&recoveryProfileSequenceAPI{
+		MockAPI: env.Mock, historyIDs: []uint64{1500, 2000},
+	}, env.Store, nil)
+
+	_, err = syncer.IncrementalWithHistoryRecovery(env.Context, source, nil)
+	requirements.ErrorContains(err, "unresolved items")
+	refreshed, err := env.Store.GetSourceByID(source.ID)
+	requirements.NoError(err)
+	requirements.Empty(refreshed.SyncCursor.String)
+	listed := env.Mock.ListMessagesCalls
+	requirements.Positive(listed)
+	delete(env.Mock.GetMessageError, "arrived-during-listing")
+	_, err = syncer.IncrementalWithHistoryRecovery(env.Context, refreshed, nil)
+	requirements.NoError(err, "retry must replay history from the pinned listing boundary")
+	requirements.Equal(listed, env.Mock.ListMessagesCalls,
+		"failed catch-up item must not force another complete listing")
+	assertRawDataExists(t, env.Store, "arrived-during-listing")
+	refreshed, err = env.Store.GetSourceByID(source.ID)
+	requirements.NoError(err)
+	requirements.Equal("2000", refreshed.SyncCursor.String)
+}
+
 func TestGmailAdoptionItemFailureRestartsIncompleteListing(t *testing.T) {
 	requirements := require.New(t)
 	env := newTestEnv(t)

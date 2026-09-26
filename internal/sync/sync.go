@@ -1103,7 +1103,7 @@ func (s *Syncer) recoverExpiredHistory(
 		if prior != nil && isPinnedHistoryRecovery(prior) {
 			catchupSource := *source
 			catchupSource.SyncCursor = prior.CursorAfter
-			return s.incremental(ctx, &catchupSource, execution)
+			return s.incrementalWithCompletionMode(ctx, &catchupSource, execution, true)
 		}
 		// A partial listing with item errors cannot become a baseline. Its
 		// checkpoint carries the error count, so resuming that prefix would
@@ -1138,7 +1138,8 @@ func (s *Syncer) recoverExpiredHistory(
 			String: strconv.FormatUint(fullSummary.FinalHistoryID, 10), Valid: true,
 		}
 	}
-	catchup, err := s.incremental(ctx, refreshed, execution)
+	catchup, err := s.incrementalWithCompletionMode(ctx, refreshed, execution,
+		preserveAbsentAtAdoption)
 	if err != nil {
 		return nil, fmt.Errorf("recover expired history: catch up from full-sync cursor: %w", err)
 	}
