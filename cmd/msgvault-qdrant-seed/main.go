@@ -1,3 +1,5 @@
+//go:build sqlite_vec
+
 // msgvault-qdrant-seed copies existing authoritative vectors into a derived
 // Qdrant collection. Its only SQLite writes create the outbox and readiness
 // metadata; embedding and archive rows remain authoritative and untouched.
@@ -8,6 +10,7 @@ import (
 	"database/sql"
 	"encoding/binary"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"math"
@@ -43,7 +46,7 @@ func run() error {
 	initOnly := flag.Bool("init", false, "install the transactional change log before seeding")
 	flag.Parse()
 	if *dbPath == "" || (!*reconcileOnly && !*initOnly && *checkpoint == "") {
-		return fmt.Errorf("vectors and checkpoint paths are required")
+		return errors.New("vectors and checkpoint paths are required")
 	}
 	if err := sqlitevec.RegisterExtension(); err != nil {
 		return err
@@ -54,7 +57,7 @@ func run() error {
 		if err != nil {
 			return err
 		}
-		defer source.Close()
+		defer func() { _ = source.Close() }()
 		if err := source.EnableQdrantChangeLog(ctx); err != nil {
 			return err
 		}
@@ -65,7 +68,7 @@ func run() error {
 	if err != nil {
 		return err
 	}
-	defer db.Close()
+	defer func() { _ = db.Close() }()
 	var gen int64
 	var dim int
 	if err := db.QueryRowContext(ctx, "SELECT id, dimension FROM index_generations WHERE state='active'").Scan(&gen, &dim); err != nil {
@@ -92,7 +95,7 @@ func run() error {
 			return err
 		}
 		if previous.SourceID != sourceID || previous.Generation != gen || previous.Collection != client.CollectionName() {
-			return fmt.Errorf("checkpoint belongs to another source, generation, or collection")
+			return errors.New("checkpoint belongs to another source, generation, or collection")
 		}
 		checkpointValue = previous
 	} else if !os.IsNotExist(err) {
@@ -115,16 +118,23 @@ func run() error {
 	if err != nil {
 		return err
 	}
+	defer func() { _ = planRows.Close() }()
 	for planRows.Next() {
 		var id, parent, aux int
 		var detail string
 		if err := planRows.Scan(&id, &parent, &aux, &detail); err != nil {
-			planRows.Close()
+			_ = planRows.Close()
 			return err
 		}
 		fmt.Println("plan:", detail)
 	}
-	planRows.Close()
+	if err := planRows.Err(); err != nil {
+		_ = planRows.Close()
+		return err
+	}
+	if err := planRows.Close(); err != nil {
+		return err
+	}
 	start := time.Now()
 	count := 0
 	minNorm, maxNorm := math.Inf(1), 0.0
@@ -138,11 +148,11 @@ func run() error {
 			var p qdrantindex.Point
 			var blob []byte
 			if err := rows.Scan(&p.ID, &p.MessageID, &p.ChunkIndex, &blob); err != nil {
-				rows.Close()
+				_ = rows.Close() //nolint:sqlclosecheck // Each batch closes before the next query.
 				return err
 			}
 			if len(blob) != dim*4 {
-				rows.Close()
+				_ = rows.Close()
 				return fmt.Errorf("vector dimension mismatch at point %d", p.ID)
 			}
 			p.Vector = make([]float32, dim)
@@ -159,10 +169,12 @@ func run() error {
 			batch = append(batch, p)
 		}
 		if err := rows.Err(); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return err
 		}
-		rows.Close()
+		if err := rows.Close(); err != nil {
+			return err
+		}
 		if len(batch) == 0 {
 			break
 		}
@@ -172,7 +184,10 @@ func run() error {
 		last = batch[len(batch)-1].ID
 		count += len(batch)
 		checkpointValue.LastID = last
-		encoded, _ := json.Marshal(checkpointValue)
+		encoded, err := json.Marshal(checkpointValue)
+		if err != nil {
+			return err
+		}
 		tmp := *checkpoint + ".tmp"
 		if err := os.WriteFile(tmp, encoded, 0600); err != nil {
 			return err
@@ -212,12 +227,13 @@ func reconcile(ctx context.Context, db *sql.DB, dbPath string, client *qdrantind
 	if err != nil {
 		return err
 	}
+	defer func() { _ = rows.Close() }()
 	var missing []uint64
 	var expected int64
 	for rows.Next() {
 		var id uint64
 		if err := rows.Scan(&id); err != nil {
-			rows.Close()
+			_ = rows.Close()
 			return err
 		}
 		expected++
@@ -228,10 +244,12 @@ func reconcile(ctx context.Context, db *sql.DB, dbPath string, client *qdrantind
 		}
 	}
 	if err := rows.Err(); err != nil {
-		rows.Close()
+		_ = rows.Close()
 		return err
 	}
-	rows.Close()
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	base := sqlitevec.VectorTableName(dim)
 	lookup := fmt.Sprintf(`SELECT e.message_id,e.chunk_index,substr(vc.vectors,r.chunk_offset*?*4+1,?*4)
 		FROM embeddings e CROSS JOIN %s_rowids r ON r.rowid=e.embedding_id
@@ -286,23 +304,23 @@ func reconcile(ctx context.Context, db *sql.DB, dbPath string, client *qdrantind
 		return err
 	}
 	if actual != expected && pending == 0 {
-		return fmt.Errorf("Qdrant count differs from authoritative rows after reconciliation")
+		return errors.New("qdrant count differs from authoritative rows after reconciliation")
 	}
 	writer, err := sqlitevec.Open(ctx, sqlitevec.Options{Path: dbPath})
 	if err != nil {
 		return err
 	}
 	if err := writer.MarkQdrantReady(ctx, vector.GenerationID(gen), client.CollectionName(), sourceID); err != nil {
-		writer.Close()
+		_ = writer.Close()
 		return err
 	}
 	bootID, err := client.RotateBootID(ctx, sourceID, gen)
 	if err != nil {
-		writer.Close()
+		_ = writer.Close()
 		return err
 	}
 	if err := writer.SetQdrantBootID(ctx, vector.GenerationID(gen), client.CollectionName(), sourceID, bootID); err != nil {
-		writer.Close()
+		_ = writer.Close()
 		return err
 	}
 	if err := writer.Close(); err != nil {
@@ -314,7 +332,7 @@ func reconcile(ctx context.Context, db *sql.DB, dbPath string, client *qdrantind
 
 func retryWrite(ctx context.Context, write func() error) error {
 	var err error
-	for attempt := 0; attempt < 5; attempt++ {
+	for attempt := range 5 {
 		if err = write(); err == nil {
 			return nil
 		}

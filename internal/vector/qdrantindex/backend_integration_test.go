@@ -32,7 +32,7 @@ func TestQdrantIndexPublishesAndRecoversFromFailure(t *testing.T) {
 	mainPath := filepath.Join(dir, "main.db")
 	mainDB, err := sql.Open(sqlitevec.DriverName(), mainPath)
 	require.NoError(t, err)
-	defer mainDB.Close()
+	defer func() { _ = mainDB.Close() }()
 	_, err = mainDB.Exec(`CREATE TABLE messages(id INTEGER PRIMARY KEY, subject TEXT, list_id TEXT, message_type TEXT NOT NULL DEFAULT 'email',
 		source_id INTEGER, conversation_id INTEGER, sender_id INTEGER, has_attachments BOOLEAN, size_estimate INTEGER, sent_at DATETIME,
 		deleted_at DATETIME, deleted_from_source_at DATETIME, embed_gen INTEGER);
@@ -126,7 +126,7 @@ func TestQdrantIndexPublishesAndRecoversFromFailure(t *testing.T) {
 	restarted, err := Wrap(source, mainDB, endpoint, prefix)
 	require.NoError(t, err)
 	require.NoError(t, restarted.Start(ctx))
-	defer restarted.Close()
+	defer func() { _ = restarted.Close() }()
 	waitIndex(t, restarted, client, 2)
 	hits, err = restarted.Search(ctx, gen, unit(2), 1, vector.Filter{})
 	require.NoError(t, err)

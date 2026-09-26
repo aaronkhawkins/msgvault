@@ -57,18 +57,18 @@ func (c *Client) request(ctx context.Context, method, path string, body any, res
 		}
 		reader = bytes.NewReader(buf)
 	}
-	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader) //nolint:gosec // Endpoint is explicit operator configuration on a private service.
 	if err != nil {
 		return err
 	}
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	resp, err := c.http.Do(req)
+	resp, err := c.http.Do(req) //nolint:gosec // Only the validated operator-configured Qdrant endpoint is contacted.
 	if err != nil {
 		return fmt.Errorf("qdrant request: %w", err)
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("qdrant %s: HTTP %d", method, resp.StatusCode)
 	}
@@ -124,11 +124,11 @@ func (c *Client) RotateBootID(ctx context.Context, sourceID string, gen int64) (
 	}
 	if info.Config.Metadata.SourceID != sourceID || info.Config.Metadata.Generation != gen ||
 		!strings.EqualFold(info.Config.Params.Vectors.Distance, "Euclid") {
-		return "", fmt.Errorf("qdrant collection provenance mismatch")
+		return "", errors.New("qdrant collection provenance mismatch")
 	}
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
-		return "", err
+		return "", fmt.Errorf("generate Qdrant boot marker: %w", err)
 	}
 	bootID := hex.EncodeToString(nonce[:])
 	if err := c.request(ctx, http.MethodPatch, c.collectionPath(), map[string]any{
@@ -150,7 +150,7 @@ func (c *Client) EnsureCollection(ctx context.Context, dimension int, sourceID s
 	if err == nil {
 		if info.Config.Params.Vectors.Size != dimension || !strings.EqualFold(info.Config.Params.Vectors.Distance, "Euclid") ||
 			info.Config.Metadata.SourceID != sourceID || info.Config.Metadata.Generation != gen {
-			return fmt.Errorf("qdrant collection dimension, metric, or provenance mismatch")
+			return errors.New("qdrant collection dimension, metric, or provenance mismatch")
 		}
 		return nil
 	}

@@ -19,6 +19,7 @@ import (
 // delegated to SQLite, which keeps ownership of generations and embeddings.
 type Backend struct {
 	*sqlitevec.Backend
+
 	endpoint string
 	prefix   string
 	mainDB   *sql.DB
@@ -102,7 +103,7 @@ func (b *Backend) rotateBootID(ctx context.Context) error {
 	valid := client.ProvenanceMatches(checkCtx, sourceID, int64(gen.ID), bootID)
 	cancel()
 	if !valid {
-		return errors.New("Qdrant boot marker mismatch; reconcile the derived index")
+		return errors.New("qdrant boot marker mismatch; reconcile the derived index")
 	}
 	if err := b.SetQdrantBootID(ctx, gen.ID, client.CollectionName(), sourceID, ""); err != nil {
 		return err
@@ -136,22 +137,22 @@ func (b *Backend) Status(ctx context.Context) (pending int64, lastError string, 
 		if gen, genErr := b.ActiveGeneration(ctx); genErr == nil {
 			sourceID, identityErr := b.QdrantSourceIdentity(ctx)
 			if identityErr != nil {
-				return pending, identityErr.Error(), err
+				return pending, identityErr.Error(), identityErr
 			}
 			client, clientErr := b.client(gen.ID)
 			if clientErr != nil {
-				return pending, clientErr.Error(), err
+				return pending, clientErr.Error(), clientErr
 			}
 			ready, readyErr := b.QdrantReady(ctx, gen.ID, client.CollectionName(), sourceID)
 			if readyErr != nil {
-				return pending, readyErr.Error(), err
+				return pending, readyErr.Error(), readyErr
 			}
 			if !ready {
 				return pending, "Qdrant collection has not completed reconciliation", err
 			}
 			bootID, bootErr := b.QdrantBootID(ctx, gen.ID, client.CollectionName(), sourceID)
 			if bootErr != nil {
-				return pending, bootErr.Error(), err
+				return pending, bootErr.Error(), bootErr
 			}
 			checkCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 			provenanceOK := client.ProvenanceMatches(checkCtx, sourceID, int64(gen.ID), bootID)
@@ -385,12 +386,15 @@ func (b *Backend) FusedSearch(ctx context.Context, req vector.FusedRequest) ([]v
 		for _, hit := range vec {
 			ids = append(ids, hit.MessageID)
 		}
-		encoded, _ := json.Marshal(ids)
+		encoded, err := json.Marshal(ids)
+		if err != nil {
+			return nil, false, err
+		}
 		rows, err := b.mainDB.QueryContext(ctx, `SELECT id, COALESCE(subject,'') FROM messages WHERE id IN (SELECT value FROM json_each(?))`, string(encoded))
 		if err != nil {
 			return nil, false, err
 		}
-		defer rows.Close()
+		defer func() { _ = rows.Close() }()
 		subjects = make(map[int64]string, len(ids))
 		for rows.Next() {
 			var id int64

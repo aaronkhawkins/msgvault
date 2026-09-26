@@ -599,7 +599,7 @@ func setupVectorFeatures(ctx context.Context, mainStore *store.Store, mainPath s
 			sb, ok := backend.(*sqlitevec.Backend)
 			if !ok {
 				_ = closeFn()
-				return nil, errors.New("Qdrant search requires SQLite vector storage")
+				return nil, errors.New("qdrant search requires SQLite vector storage")
 			}
 			qb, err := qdrantindex.Wrap(sb, mainDB, vecCfg.Qdrant.Endpoint, vecCfg.Qdrant.CollectionPrefix)
 			if err != nil {
@@ -775,7 +775,7 @@ func newVisualRuntime(
 	case *sqlitevec.Backend:
 		visualBackend = typed.Visual()
 	case *qdrantindex.Backend:
-		visualBackend = typed.Backend.Visual()
+		visualBackend = typed.Visual()
 	case *pgvector.Backend:
 		visualBackend = typed.Visual()
 	default:

@@ -587,7 +587,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 	resp := statsResponseFromStore(stats)
 	resp.VectorSearch = vs
 	if status, ok := backend.(interface {
-		Status(context.Context) (int64, string, error)
+		Status(ctx context.Context) (int64, string, error)
 	}); ok {
 		pending, lastError, statusErr := status.Status(r.Context())
 		if statusErr != nil {

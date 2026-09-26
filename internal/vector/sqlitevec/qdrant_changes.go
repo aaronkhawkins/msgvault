@@ -6,6 +6,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 
 	"go.kenn.io/msgvault/internal/vector"
@@ -86,7 +87,7 @@ func (b *Backend) SetQdrantBootID(ctx context.Context, gen vector.GenerationID, 
 		return err
 	}
 	if changed != 1 {
-		return fmt.Errorf("Qdrant readiness row changed")
+		return errors.New("qdrant readiness row changed")
 	}
 	return nil
 }
@@ -97,7 +98,7 @@ func (b *Backend) MarkQdrantReady(ctx context.Context, gen vector.GenerationID, 
 		return err
 	}
 	if current != sourceID {
-		return fmt.Errorf("Qdrant source identity changed")
+		return errors.New("qdrant source identity changed")
 	}
 	_, err = b.db.ExecContext(ctx, `INSERT INTO qdrant_ready(generation_id,collection_name,source_id,boot_id) VALUES(?,?,?,'')
 		ON CONFLICT(generation_id) DO UPDATE SET collection_name=excluded.collection_name,source_id=excluded.source_id,boot_id=''`, int64(gen), collection, sourceID)
@@ -112,13 +113,13 @@ func (b *Backend) PendingQdrantChanges(ctx context.Context) (int64, error) {
 
 func (b *Backend) NextQdrantChanges(ctx context.Context, limit int) ([]QdrantChange, error) {
 	if limit < 1 || limit > 1024 {
-		return nil, fmt.Errorf("invalid qdrant change limit")
+		return nil, errors.New("invalid qdrant change limit")
 	}
 	rows, err := b.db.QueryContext(ctx, `SELECT sequence, generation_id, embedding_id, deleted FROM qdrant_changes ORDER BY sequence LIMIT ?`, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var out []QdrantChange
 	for rows.Next() {
 		var change QdrantChange
@@ -142,7 +143,7 @@ func (b *Backend) QdrantPoint(ctx context.Context, embeddingID uint64) (gen vect
 	err = b.db.QueryRowContext(ctx, `SELECT g.id, g.dimension, e.message_id, e.chunk_index
 		FROM embeddings e JOIN index_generations g ON g.id=e.generation_id
 		WHERE e.embedding_id=?`, embeddingID).Scan(&gen, &dim, &messageID, &chunkIndex)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, 0, 0, nil, false, nil
 	}
 	if err != nil {
@@ -153,7 +154,7 @@ func (b *Backend) QdrantPoint(ctx context.Context, embeddingID uint64) (gen vect
 	err = b.db.QueryRowContext(ctx, fmt.Sprintf(`SELECT substr(vc.vectors, r.chunk_offset*?*4+1, ?*4)
 		FROM %s_rowids r CROSS JOIN %s_vector_chunks00 vc ON vc.rowid=+r.chunk_id
 		WHERE r.rowid=?`, base, base), dim, dim, embeddingID).Scan(&blob)
-	if err == sql.ErrNoRows {
+	if errors.Is(err, sql.ErrNoRows) {
 		return 0, 0, 0, nil, false, nil
 	}
 	if err != nil {
@@ -212,7 +213,7 @@ func (b *Backend) QdrantMessageIDsForEmbeddingIDs(ctx context.Context, gen vecto
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	result := make(map[uint64]int64, len(ids))
 	for rows.Next() {
 		var id uint64
