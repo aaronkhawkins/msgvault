@@ -138,6 +138,37 @@ func TestSaveIMAPFolderStates_CleanRunPersists(t *testing.T) {
 	}, loaded)
 }
 
+func TestSaveIMAPFolderStates_ResolvesRecoverableMessageIDAcrossMailboxes(t *testing.T) {
+	require := require.New(t)
+	addr, user := testutil.StartIMAPMemServerWithSpecialUse(
+		t,
+		map[string]int{"[Gmail]/All Mail": 0, "Archive": 0},
+		map[string][]imapapi.MailboxAttr{"[Gmail]/All Mail": {imapapi.MailboxAttrAll}},
+	)
+	const id = "legacy id@example.test"
+	testutil.AppendIMAPMessageWithMessageID(t, user, "[Gmail]/All Mail", id)
+	testutil.AppendIMAPMessageWithMessageID(t, user, "Archive", id)
+	st := testutil.NewTestStore(t)
+	src, err := st.GetOrCreateSource("imap", "imap://synthetic@example.test")
+	require.NoError(err)
+	client := listedIMAPClient(t, addr)
+	raw, err := client.GetMessagesRawBatchWithErrors(
+		context.Background(), []string{"[Gmail]/All Mail|1"})
+	require.NoError(err)
+	require.Len(raw, 1)
+	require.NoError(raw[0].Err)
+
+	// The archive may still identify the copy by its older secondary UID.
+	// Both live mailbox UIDs must resolve to that same stored message.
+	seedIMAPMessage(t, st, src, "Archive|1", "<"+id+">")
+	require.NoError(saveIMAPFolderStates(
+		context.Background(), st, src, client, completedIMAPSyncSummary(t, st, src), 0))
+	require.Equal(2, imapMembershipRowCount(t, st, src.ID))
+	states, err := loadIMAPFolderStates(st, src.ID)
+	require.NoError(err)
+	require.Len(states, 2)
+}
+
 func TestSaveIMAPFolderStates_SupersededGenerationCannotOverwriteNewerRun(t *testing.T) {
 	require := require.New(t)
 	assert := assert.New(t)
