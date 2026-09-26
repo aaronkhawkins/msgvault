@@ -10,59 +10,61 @@ import (
 )
 
 func TestAdoptedGmailThreadRoutesToExistingConversationWithoutMerging(t *testing.T) {
+	requirements := require.New(t)
 	st := testutil.NewSQLiteTestStore(t)
 	src, err := st.GetOrCreateSource("gmail", "owner@example.test")
-	require.NoError(t, err)
+	requirements.NoError(err)
 	first, err := st.EnsureConversation(src.ID, "legacy-a", "First")
-	require.NoError(t, err)
+	requirements.NoError(err)
 	second, err := st.EnsureConversation(src.ID, "legacy-b", "Second")
-	require.NoError(t, err)
-	require.NotEqual(t, first, second)
+	requirements.NoError(err)
+	requirements.NotEqual(first, second)
 	_, err = st.DB().Exec(st.Rebind(`INSERT INTO gmail_thread_adoption
 		(source_id, gmail_thread_id, conversation_id) VALUES (?, ?, ?)`),
 		src.ID, "gmail-thread", first)
-	require.NoError(t, err)
+	requirements.NoError(err)
 	got, err := st.EnsureConversation(src.ID, "gmail-thread", "New mail")
-	require.NoError(t, err)
-	require.Equal(t, first, got)
+	requirements.NoError(err)
+	requirements.Equal(first, got)
 	var oldID int64
-	require.NoError(t, st.DB().QueryRow(st.Rebind(`SELECT id FROM conversations
+	requirements.NoError(st.DB().QueryRow(st.Rebind(`SELECT id FROM conversations
 		WHERE source_id = ? AND source_conversation_id = ?`),
 		src.ID, "legacy-b").Scan(&oldID))
-	require.Equal(t, second, oldID)
+	requirements.Equal(second, oldID)
 }
 
 func TestGmailSourceIDRekeyPreservesEmbeddingWatermark(t *testing.T) {
+	requirements := require.New(t)
 	st := testutil.NewSQLiteTestStore(t)
 	src, err := st.GetOrCreateSource("imap", "legacy@example.test")
-	require.NoError(t, err)
+	requirements.NoError(err)
 	conversationID, err := st.EnsureConversation(src.ID, "legacy-thread", "Legacy")
-	require.NoError(t, err)
+	requirements.NoError(err)
 	messageID, err := st.UpsertMessage(&store.Message{
 		SourceID: src.ID, ConversationID: conversationID,
 		SourceMessageID: "All Mail|1", MessageType: "email",
 		Subject: sql.NullString{String: "Synthetic", Valid: true},
 	})
-	require.NoError(t, err)
+	requirements.NoError(err)
 	_, err = st.DB().Exec(st.Rebind(`UPDATE messages SET embed_gen = ? WHERE id = ?`),
 		int64(7), messageID)
-	require.NoError(t, err)
+	requirements.NoError(err)
 	var beforeClock int64
-	require.NoError(t, st.DB().QueryRow(`SELECT sequence FROM embedding_change_clock
+	requirements.NoError(st.DB().QueryRow(`SELECT sequence FROM embedding_change_clock
 		WHERE singleton = 1`).Scan(&beforeClock))
 	rekeyed, err := st.RekeyMessageSourceID(messageID, "All Mail|1", "a1")
-	require.NoError(t, err)
-	require.True(t, rekeyed)
+	requirements.NoError(err)
+	requirements.True(rekeyed)
 	var gotID, gotGeneration, afterClock int64
 	var gotSourceID string
-	require.NoError(t, st.DB().QueryRow(st.Rebind(`SELECT id, source_message_id,
+	requirements.NoError(st.DB().QueryRow(st.Rebind(`SELECT id, source_message_id,
 		embed_gen FROM messages WHERE id = ?`), messageID).Scan(
 		&gotID, &gotSourceID, &gotGeneration))
-	require.Equal(t, messageID, gotID)
-	require.Equal(t, "a1", gotSourceID)
-	require.Equal(t, int64(7), gotGeneration)
-	require.NoError(t, st.DB().QueryRow(`SELECT sequence FROM embedding_change_clock
+	requirements.Equal(messageID, gotID)
+	requirements.Equal("a1", gotSourceID)
+	requirements.Equal(int64(7), gotGeneration)
+	requirements.NoError(st.DB().QueryRow(`SELECT sequence FROM embedding_change_clock
 		WHERE singleton = 1`).Scan(&afterClock))
-	require.Equal(t, beforeClock, afterClock,
+	requirements.Equal(beforeClock, afterClock,
 		"source identity rekey must not enqueue existing embeddings")
 }
