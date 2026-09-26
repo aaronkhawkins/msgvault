@@ -25,6 +25,7 @@ import (
 	"go.kenn.io/msgvault/internal/vector/hybrid"
 	"go.kenn.io/msgvault/internal/vector/personsearch"
 	"go.kenn.io/msgvault/internal/vector/pgvector"
+	"go.kenn.io/msgvault/internal/vector/qdrantindex"
 	"go.kenn.io/msgvault/internal/vector/sqlitevec"
 	"go.kenn.io/msgvault/internal/vector/visual"
 )
@@ -593,7 +594,30 @@ func setupVectorFeatures(ctx context.Context, mainStore *store.Store, mainPath s
 		features.SemanticClient = runtime.SemanticClient
 		features.DocumentQueryClient = runtime.QuerySemanticClient
 		features.PersonQueryClient = runtime.PersonQueryClient
-		features.HybridEngine = hybrid.NewEngine(backend, mainDB, runtime.QueryClient, hybrid.Config{
+		searchBackend := backend
+		if vecCfg.Qdrant.Enabled {
+			sb, ok := backend.(*sqlitevec.Backend)
+			if !ok {
+				_ = closeFn()
+				return nil, errors.New("qdrant search requires SQLite vector storage")
+			}
+			qb, err := qdrantindex.Wrap(sb, mainDB, vecCfg.Qdrant.Endpoint, vecCfg.Qdrant.CollectionPrefix)
+			if err != nil {
+				_ = closeFn()
+				return nil, fmt.Errorf("configure Qdrant search: %w", err)
+			}
+			if !readOnly {
+				if err := qb.Start(ctx); err != nil {
+					_ = closeFn()
+					return nil, fmt.Errorf("start Qdrant change publisher: %w", err)
+				}
+			}
+			searchBackend = qb
+			features.Backend = qb
+			closeFn = qb.Close
+			features.Close = closeFn
+		}
+		features.HybridEngine = hybrid.NewEngine(searchBackend, mainDB, runtime.QueryClient, hybrid.Config{
 			ExpectedFingerprint: vecCfg.GenerationFingerprint(),
 			RRFK:                vecCfg.Search.RRFK,
 			KPerSignal:          vecCfg.Search.KPerSignal,
@@ -749,6 +773,8 @@ func newVisualRuntime(
 	var visualBackend visual.Backend
 	switch typed := backend.(type) {
 	case *sqlitevec.Backend:
+		visualBackend = typed.Visual()
+	case *qdrantindex.Backend:
 		visualBackend = typed.Visual()
 	case *pgvector.Backend:
 		visualBackend = typed.Visual()

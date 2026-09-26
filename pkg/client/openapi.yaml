@@ -10483,6 +10483,8 @@ components:
         total_threads:
           format: int64
           type: integer
+        vector_index:
+          $ref: "#/components/schemas/VectorIndexStatus"
         vector_search:
           $ref: "#/components/schemas/StatsView"
         vector_status:
@@ -11407,6 +11409,19 @@ components:
           type: string
       required:
         - status
+      type: object
+    VectorIndexStatus:
+      properties:
+        backend:
+          type: string
+        error:
+          type: string
+        pending:
+          format: int64
+          type: integer
+      required:
+        - backend
+        - pending
       type: object
     VisualBuildRequest:
       additionalProperties: false

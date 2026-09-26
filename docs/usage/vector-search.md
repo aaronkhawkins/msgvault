@@ -58,6 +58,37 @@ on your own machine or network.
    `pgvector` build tag, for example
    `go build -tags "fts5 sqlite_vec pgvector" ./cmd/msgvault`.
 
+### Optional Qdrant search index for SQLite
+
+Qdrant can mirror message vectors for faster semantic and hybrid search while
+`vectors.db` remains the source of truth. Run Qdrant on a private network
+reachable from msgvault, then add:
+
+```toml
+[vector.qdrant]
+enabled = true
+endpoint = "http://qdrant:6333"
+collection_prefix = "msgvault"
+```
+
+For an existing archive, install the transactional change log **before** the
+initial seed. With the writer stopped or the old version still running, run
+`msgvault-qdrant-seed -init -vectors /data/vectors.db`. Then run
+`msgvault-qdrant-seed -vectors /data/vectors.db -endpoint http://qdrant:6333
+-collection-prefix msgvault -checkpoint /data/qdrant-seed.json` with access to
+Qdrant and a writable checkpoint directory. The seed reads the existing
+embeddings; it does not call the embedding endpoint. After it finishes, run
+`msgvault-qdrant-seed -reconcile-only -vectors /data/vectors.db -endpoint
+http://qdrant:6333 -collection-prefix msgvault` with writable access to
+`vectors.db`, then start the Qdrant-enabled msgvault server. The published
+Docker image includes `msgvault-qdrant-seed` for these one-shot commands.
+
+Search falls back to SQLite while the mirror has pending changes, is
+unavailable, or has not passed reconciliation. If an older `vectors.db`
+snapshot is restored, stop the msgvault writer, run the reconciliation command
+again against that restored database, and restart msgvault. The statistics
+endpoint reports the pending change count and index error state.
+
 !!! tip "Fastest path to using embeddings on Mac"
     On a Mac, the quickest endpoint is [`afm`](https://github.com/scouzi1966/maclocal-api):
     it serves OpenAI-compatible embeddings from Apple's on-device NaturalLanguage model

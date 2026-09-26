@@ -49,16 +49,17 @@ const sourceStatusItemErrorLimit = 10
 // SourceDeletedMessages. Clients should prefer the explicit fields when
 // presenting a total.
 type StatsResponse struct {
-	TotalMessages         int64             `json:"total_messages"`
-	ActiveMessages        int64             `json:"active_messages"`
-	SourceDeletedMessages int64             `json:"source_deleted_messages"`
-	TotalThreads          int64             `json:"total_threads"`
-	TotalAccounts         int64             `json:"total_accounts"`
-	TotalLabels           int64             `json:"total_labels"`
-	TotalAttach           int64             `json:"total_attachments"`
-	DatabaseSize          int64             `json:"database_size_bytes"`
-	VectorSearch          *vector.StatsView `json:"vector_search,omitempty"`
-	VectorStatus          string            `json:"vector_status,omitempty"`
+	TotalMessages         int64              `json:"total_messages"`
+	ActiveMessages        int64              `json:"active_messages"`
+	SourceDeletedMessages int64              `json:"source_deleted_messages"`
+	TotalThreads          int64              `json:"total_threads"`
+	TotalAccounts         int64              `json:"total_accounts"`
+	TotalLabels           int64              `json:"total_labels"`
+	TotalAttach           int64              `json:"total_attachments"`
+	DatabaseSize          int64              `json:"database_size_bytes"`
+	VectorSearch          *vector.StatsView  `json:"vector_search,omitempty"`
+	VectorStatus          string             `json:"vector_status,omitempty"`
+	VectorIndex           *VectorIndexStatus `json:"vector_index,omitempty"`
 	// VectorTextStatus reports the TEXT vector lane specifically. A
 	// multimodal-only daemon is vector-"ready" without serving semantic
 	// message search, so text-tool registration must consult this field,
@@ -73,6 +74,14 @@ type StatsResponse struct {
 	// "still initializing" from "not configured" instead of permanently
 	// omitting the visual tool after a transient 503.
 	VectorVisualStatus string `json:"vector_visual_status,omitempty"`
+}
+
+// VectorIndexStatus reports derived-index lag independently of authoritative
+// SQLite embedding coverage. Searches use exact SQLite while pending is nonzero.
+type VectorIndexStatus struct {
+	Backend string `json:"backend"`
+	Pending int64  `json:"pending"`
+	Error   string `json:"error,omitempty"`
 }
 
 // APIMessage is an alias for store.APIMessage — single source of truth for
@@ -577,6 +586,15 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 
 	resp := statsResponseFromStore(stats)
 	resp.VectorSearch = vs
+	if status, ok := backend.(interface {
+		Status(ctx context.Context) (int64, string, error)
+	}); ok {
+		pending, lastError, statusErr := status.Status(r.Context())
+		if statusErr != nil {
+			lastError = statusErr.Error()
+		}
+		resp.VectorIndex = &VectorIndexStatus{Backend: "qdrant", Pending: pending, Error: lastError}
+	}
 	s.refreshVectorStatus(r.Context())
 	if status, _ := s.VectorStatus(); status != VectorStatusDisabled {
 		resp.VectorStatus = string(status)

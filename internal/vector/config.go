@@ -91,6 +91,7 @@ type Config struct {
 	Embed      EmbedConfig      `toml:"embed"`
 	Multimodal MultimodalConfig `toml:"multimodal"`
 	People     PeopleConfig     `toml:"people"`
+	Qdrant     QdrantConfig     `toml:"qdrant"`
 
 	// SkipExtensionCreate skips the `CREATE EXTENSION IF NOT EXISTS
 	// vector` step on the pgvector backend while still letting Migrate
@@ -99,6 +100,14 @@ type Config struct {
 	// an administrator and the msgvault role lacks the superuser privilege
 	// CREATE EXTENSION requires. Ignored on the sqlite-vec backend.
 	SkipExtensionCreate bool `toml:"skip_extension_create"`
+}
+
+// QdrantConfig selects an additive search index; SQLite remains the
+// authoritative embedding store and exact-mode rollback path.
+type QdrantConfig struct {
+	Enabled          bool   `toml:"enabled"`
+	Endpoint         string `toml:"endpoint"`
+	CollectionPrefix string `toml:"collection_prefix"`
 }
 
 // MultimodalConfig is an independently enabled hosted visual-embedding lane.
@@ -594,6 +603,15 @@ func (c *Config) Validate() error {
 	}
 	if err := c.Embeddings.Validate(); err != nil {
 		return err
+	}
+	if c.Qdrant.Enabled {
+		if c.Backend != "sqlite-vec" {
+			return errors.New("vector.qdrant requires sqlite-vec authoritative storage")
+		}
+		u, err := url.Parse(c.Qdrant.Endpoint)
+		if err != nil || u.Scheme != "http" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || c.Qdrant.CollectionPrefix == "" {
+			return errors.New("vector.qdrant requires a private http endpoint and collection_prefix")
+		}
 	}
 	if c.People.Enabled {
 		if _, err := c.SemanticPersonEmbeddingProfile(); err != nil {

@@ -51,6 +51,8 @@ RUN CGO_ENABLED=1 go build \
         -X go.kenn.io/msgvault/cmd/msgvault/cmd.BuildDate=${BUILD_DATE}" \
     -o /msgvault \
     ./cmd/msgvault
+RUN CGO_ENABLED=1 go build -tags "fts5 sqlite_vec" -trimpath -ldflags="-s -w" \
+    -o /msgvault-qdrant-seed ./cmd/msgvault-qdrant-seed
 
 # Runtime stage - Debian provides current glibc for CGO/DuckDB bindings
 FROM debian:bookworm-slim@sha256:96e378d7e6531ac9a15ad505478fcc2e69f371b10f5cdf87857c4b8188404716
@@ -69,6 +71,7 @@ RUN groupadd --gid 1000 msgvault \
 
 # Copy binary from builder
 COPY --from=builder /msgvault /usr/local/bin/msgvault
+COPY --from=builder /msgvault-qdrant-seed /usr/local/bin/msgvault-qdrant-seed
 
 # Set up data directory with correct ownership
 ENV MSGVAULT_HOME=/data
