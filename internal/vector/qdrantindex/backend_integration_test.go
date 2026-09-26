@@ -105,6 +105,39 @@ func TestQdrantIndexPublishesAndRecoversFromFailure(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, hits, 1)
 	assert.Equal(t, int64(1), hits[0].MessageID)
+	filteredHybrid, _, err := backend.FusedSearch(ctx, vector.FusedRequest{
+		FTSTerms: []string{"lunch"}, QueryVec: unit(0), Generation: gen,
+		KPerSignal: 2, Limit: 2, RRFK: 60, Filter: vector.Filter{HasAttachment: &attach},
+	})
+	require.NoError(t, err)
+	require.Len(t, filteredHybrid, 1)
+	assert.Equal(t, int64(1), filteredHybrid[0].MessageID)
+	vectorOnly, _, err := backend.FusedSearch(ctx, vector.FusedRequest{
+		QueryVec: unit(0), Generation: gen, KPerSignal: 2, Limit: 2, RRFK: 60,
+		Filter: vector.Filter{HasAttachment: &attach},
+	})
+	require.NoError(t, err)
+	require.Len(t, vectorOnly, 1)
+	assert.Equal(t, int64(1), vectorOnly[0].MessageID)
+	_, err = mainDB.Exec(`UPDATE messages SET source_id=2 WHERE id=2;
+		UPDATE messages SET sent_at='2026-01-02' WHERE id=1;
+		UPDATE messages SET sent_at='2025-01-02' WHERE id=2`)
+	require.NoError(t, err)
+	from2026 := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+	filteredHybrid, _, err = backend.FusedSearch(ctx, vector.FusedRequest{
+		FTSTerms: []string{"meeting"}, QueryVec: unit(1), Generation: gen,
+		KPerSignal: 2, Limit: 2, RRFK: 60, Filter: vector.Filter{SourceIDs: []int64{2}},
+	})
+	require.NoError(t, err)
+	require.Len(t, filteredHybrid, 1)
+	assert.Equal(t, int64(2), filteredHybrid[0].MessageID)
+	filteredHybrid, _, err = backend.FusedSearch(ctx, vector.FusedRequest{
+		FTSTerms: []string{"lunch"}, QueryVec: unit(0), Generation: gen,
+		KPerSignal: 2, Limit: 2, RRFK: 60, Filter: vector.Filter{After: &from2026},
+	})
+	require.NoError(t, err)
+	require.Len(t, filteredHybrid, 1)
+	assert.Equal(t, int64(1), filteredHybrid[0].MessageID)
 	require.NoError(t, backend.Upsert(ctx, gen, []vector.Chunk{{MessageID: 1, Vector: unit(1)}}))
 	waitIndex(t, backend, client, 2)
 	require.NoError(t, backend.Delete(ctx, gen, []int64{2}))

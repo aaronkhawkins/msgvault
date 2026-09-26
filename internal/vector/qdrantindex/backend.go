@@ -10,6 +10,7 @@ import (
 	"sync"
 	"time"
 
+	"go.kenn.io/msgvault/internal/query"
 	"go.kenn.io/msgvault/internal/vector"
 	"go.kenn.io/msgvault/internal/vector/hybrid"
 	"go.kenn.io/msgvault/internal/vector/sqlitevec"
@@ -359,17 +360,9 @@ func (b *Backend) FusedSearch(ctx context.Context, req vector.FusedRequest) ([]v
 		}
 		return out, len(vec) > req.KPerSignal, nil
 	}
-	ftsReq := req
-	ftsReq.QueryVec = nil
-	ftsReq.SubjectBoost = 1
-	ftsReq.Limit = req.KPerSignal
-	fts, ftsSaturated, err := b.Backend.FusedSearch(ctx, ftsReq)
+	bm25, ftsSaturated, err := b.ftsHits(ctx, req)
 	if err != nil {
 		return nil, false, err
-	}
-	bm25 := make([]vector.Hit, len(fts))
-	for i, h := range fts {
-		bm25[i] = vector.Hit{MessageID: h.MessageID, Score: h.BM25Score, Rank: i + 1}
 	}
 	vec, err := b.Search(ctx, req.Generation, req.QueryVec, req.KPerSignal+1, req.Filter)
 	if err != nil {
@@ -413,4 +406,76 @@ func (b *Backend) FusedSearch(ctx context.Context, req vector.FusedRequest) ([]v
 		out = out[:req.Limit]
 	}
 	return out, ftsSaturated || vecSaturated, nil
+}
+
+// ftsHits ranks a bounded FTS candidate set and applies SQLite's canonical
+// live-message filters. This avoids running the original full fused CTE merely
+// to obtain the keyword leg of a Qdrant-backed hybrid search.
+func (b *Backend) ftsHits(ctx context.Context, req vector.FusedRequest) ([]vector.Hit, bool, error) {
+	_, term := query.SQLiteQueryDialect{}.BuildFTSTerm(req.FTSTerms)
+	limit := min(max((req.KPerSignal+1)*4, 128), vector.MaxFilterMessageIDs)
+	for {
+		candidates, err := b.fetchFTSCandidates(ctx, term, limit)
+		if err != nil {
+			return nil, false, err
+		}
+		ids := make([]int64, len(candidates))
+		for i, hit := range candidates {
+			ids[i] = hit.MessageID
+		}
+		allowed, err := b.FilterQdrantCandidates(ctx, ids, req.Filter)
+		if err != nil {
+			return nil, false, err
+		}
+		hits := make([]vector.Hit, 0, min(len(candidates), req.KPerSignal+1))
+		for _, hit := range candidates {
+			if !allowed[hit.MessageID] {
+				continue
+			}
+			hit.Rank = len(hits) + 1
+			hits = append(hits, hit)
+			if len(hits) > req.KPerSignal {
+				return hits[:req.KPerSignal], true, nil
+			}
+		}
+		if len(candidates) < limit {
+			return hits, false, nil
+		}
+		if limit >= vector.MaxFilterMessageIDs {
+			// Preserve complete filter semantics for unusually selective
+			// searches that exceed the bounded candidate window.
+			ftsReq := req
+			ftsReq.QueryVec = nil
+			ftsReq.SubjectBoost = 1
+			ftsReq.Limit = req.KPerSignal
+			fts, saturated, err := b.Backend.FusedSearch(ctx, ftsReq)
+			if err != nil {
+				return nil, false, err
+			}
+			out := make([]vector.Hit, len(fts))
+			for i, h := range fts {
+				out[i] = vector.Hit{MessageID: h.MessageID, Score: h.BM25Score, Rank: i + 1}
+			}
+			return out, saturated, nil
+		}
+		limit = min(limit*2, vector.MaxFilterMessageIDs)
+	}
+}
+
+func (b *Backend) fetchFTSCandidates(ctx context.Context, term string, limit int) ([]vector.Hit, error) {
+	rows, err := b.mainDB.QueryContext(ctx, `SELECT rowid, rank FROM messages_fts
+		WHERE messages_fts MATCH ? ORDER BY rank LIMIT ?`, term, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	hits := make([]vector.Hit, 0, limit)
+	for rows.Next() {
+		var hit vector.Hit
+		if err := rows.Scan(&hit.MessageID, &hit.Score); err != nil {
+			return nil, err
+		}
+		hits = append(hits, hit)
+	}
+	return hits, rows.Err()
 }
