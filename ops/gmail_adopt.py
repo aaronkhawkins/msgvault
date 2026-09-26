@@ -7,6 +7,7 @@ only while the MsgVault daemon and its scheduled writer are stopped.
 """
 
 import argparse
+import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,6 +18,16 @@ from urllib.parse import unquote, urlsplit
 
 HEX_ID = re.compile(r"[0-9a-f]+\Z")
 DECIMAL_ID = re.compile(r"[1-9][0-9]*\Z")
+
+
+def mapping_digest(rows):
+    """Bind a pilot to exact archived/provider IDs without storing them twice."""
+    digest = hashlib.sha256()
+    for message_id, old_id, gmail_id, thread_id in rows:
+        digest.update(json.dumps([message_id, old_id, gmail_id, thread_id],
+                                 separators=(",", ":")).encode())
+        digest.update(b"\n")
+    return digest.hexdigest()
 
 
 def source_email(identifier):
@@ -48,6 +59,19 @@ def adopt(archive, ledger, profile, *, complete):
         "SELECT value FROM archive_metadata WHERE key = 'archive_uid'").fetchone()
     if actual_uid is None or actual_uid[0] != archive_uid:
         raise ValueError("capture ledger belongs to another archive")
+    verified_count = profile.get("verified_count")
+    if profile.get("archive_uid") != archive_uid or \
+            profile.get("source_id") != source_id or \
+            not isinstance(verified_count, int) or verified_count < 1:
+        raise ValueError("Gmail API pilot is not bound to this archive/source")
+    pilot_rows = ledger.execute("""
+        SELECT message_id, source_message_id, gmail_id, gmail_thread_id
+        FROM capture WHERE status = 'mapped'
+        ORDER BY message_id DESC LIMIT ?
+    """, (verified_count,)).fetchall()
+    if len(pilot_rows) != verified_count or \
+            profile.get("mapping_digest") != mapping_digest(pilot_rows):
+        raise ValueError("verified Gmail API pilot mappings changed")
     row = archive.execute(
         "SELECT source_type, identifier FROM sources WHERE id = ?", (source_id,)
     ).fetchone()
@@ -111,6 +135,12 @@ def adopt(archive, ledger, profile, *, complete):
                 PRIMARY KEY (source_id, gmail_thread_id)
             )
         """)
+        archive.execute("""
+            CREATE TABLE IF NOT EXISTS gmail_archive_only_adoption (
+                message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+                source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE
+            )
+        """)
         for message_id, old_id, gmail_id, _thread_id, status in captures:
             result = archive.execute("""
                 UPDATE messages SET source_message_id = ?
@@ -126,9 +156,9 @@ def adopt(archive, ledger, profile, *, complete):
             """, (source_id, thread_id, conversation_id))
         result = archive.execute("""
             UPDATE sources SET source_type = 'gmail', identifier = ?,
-                sync_cursor = ?, sync_config = NULL
+                sync_cursor = NULL
             WHERE id = ? AND source_type = 'imap'
-        """, (email, history_id, source_id))
+        """, (email, source_id))
         if result.rowcount != 1:
             raise ValueError("source changed during adoption")
         archive.commit()
@@ -136,7 +166,7 @@ def adopt(archive, ledger, profile, *, complete):
         archive.rollback()
         raise
     return {"mapped": mapped, "threads_routed": len(canonical_threads),
-            "source_id_preserved": True}
+            "source_id_preserved": True, "cursor_pending_full_reconciliation": True}
 
 
 def main():

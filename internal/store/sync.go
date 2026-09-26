@@ -987,7 +987,7 @@ func (s *Store) CompleteSyncAndUpdateSourceCursorContext(
 	ctx context.Context, syncID int64, sourceID int64, finalHistoryID string,
 ) error {
 	return s.completeSyncAndUpdateSourceContext(
-		ctx, syncID, sourceID, finalHistoryID, true,
+		ctx, syncID, sourceID, finalHistoryID, true, nil,
 	)
 }
 
@@ -998,7 +998,23 @@ func (s *Store) CompleteSyncAndPreserveSourceCursorContext(
 	ctx context.Context, syncID int64, sourceID int64, finalHistoryID string,
 ) error {
 	return s.completeSyncAndUpdateSourceContext(
-		ctx, syncID, sourceID, finalHistoryID, false,
+		ctx, syncID, sourceID, finalHistoryID, false, nil,
+	)
+}
+
+// CompleteAdoptedGmailListingContext records old archive messages absent from
+// the first complete Gmail snapshot and completes that full run atomically.
+// The source history cursor stays empty until the subsequent history catch-up
+// succeeds. A failed or superseded run cannot publish a partial protection set.
+func (s *Store) CompleteAdoptedGmailListingContext(
+	ctx context.Context, syncID, sourceID int64, handoffHistoryID string,
+	present map[string]struct{},
+) error {
+	if present == nil {
+		return errors.New("complete adopted Gmail listing: nil provider snapshot")
+	}
+	return s.completeSyncAndUpdateSourceContext(
+		ctx, syncID, sourceID, handoffHistoryID, false, present,
 	)
 }
 
@@ -1008,6 +1024,7 @@ func (s *Store) completeSyncAndUpdateSourceContext(
 	sourceID int64,
 	finalHistoryID string,
 	updateCursor bool,
+	adoptionPresent map[string]struct{},
 ) error {
 	completionStore := s.withoutSyncScope()
 	err := completionStore.withTxContext(ctx, func(tx *loggedTx) error {
@@ -1015,6 +1032,40 @@ func (s *Store) completeSyncAndUpdateSourceContext(
 			ctx, tx, sourceID, syncID, SyncStatusRunning,
 		); err != nil {
 			return fmt.Errorf("complete sync %d: %w", syncID, err)
+		}
+		if adoptionPresent != nil {
+			rows, err := tx.QueryContext(ctx, `SELECT id, source_message_id
+				FROM messages WHERE source_id = ? AND deleted_at IS NULL
+				AND deleted_from_source_at IS NULL`, sourceID)
+			if err != nil {
+				return fmt.Errorf("list adopted archive messages: %w", err)
+			}
+			var absent []int64
+			for rows.Next() {
+				var messageID int64
+				var providerID string
+				if err := rows.Scan(&messageID, &providerID); err != nil {
+					_ = rows.Close()
+					return fmt.Errorf("scan adopted archive message: %w", err)
+				}
+				if _, ok := adoptionPresent[providerID]; !ok {
+					absent = append(absent, messageID)
+				}
+			}
+			if err := rows.Err(); err != nil {
+				_ = rows.Close()
+				return fmt.Errorf("read adopted archive messages: %w", err)
+			}
+			if err := rows.Close(); err != nil {
+				return fmt.Errorf("close adopted archive messages: %w", err)
+			}
+			for _, messageID := range absent {
+				if _, err := tx.ExecContext(ctx, `INSERT INTO gmail_archive_only_adoption
+					(message_id, source_id) VALUES (?, ?)
+					ON CONFLICT(message_id) DO NOTHING`, messageID, sourceID); err != nil {
+					return fmt.Errorf("protect adopted archive message: %w", err)
+				}
+			}
 		}
 
 		now := s.dialect.Now()

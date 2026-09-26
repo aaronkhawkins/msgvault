@@ -14,7 +14,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
 
-from gmail_adopt import source_email
+from gmail_adopt import mapping_digest, source_email
 
 
 GMAIL_READONLY_SCOPE = "https://www.googleapis.com/auth/gmail.readonly"
@@ -85,7 +85,10 @@ def pilot(archive, ledger, token, *, limit, request=gmail_get):
         attachment_messages += archive.execute(
             "SELECT EXISTS(SELECT 1 FROM attachments WHERE message_id = ?)",
             (message_id,)).fetchone()[0]
-    return {"email": email, "history_id": history_id}, {
+    return {"email": email, "history_id": history_id,
+            "archive_uid": archive_uid, "source_id": source_id,
+            "verified_count": len(candidates),
+            "mapping_digest": mapping_digest(candidates)}, {
         "api_ids_and_threads_verified": len(candidates),
         "existing_raw_messages": raw_count,
         "existing_attachment_messages": attachment_messages,

@@ -53,12 +53,22 @@ def fixture():
     return archive, ledger
 
 
+def verified_profile(ledger):
+    rows = ledger.execute("""
+        SELECT message_id, source_message_id, gmail_id, gmail_thread_id
+        FROM capture WHERE status = 'mapped'
+        ORDER BY message_id DESC LIMIT 3
+    """).fetchall()
+    return {"email": "owner@example.test", "history_id": "900",
+            "archive_uid": "synthetic-archive", "source_id": 5,
+            "verified_count": len(rows),
+            "mapping_digest": module.mapping_digest(rows)}
+
+
 class AdoptTest(unittest.TestCase):
     def test_exact_rekey_preserves_message_raw_attachment_vector_and_thread_refs(self):
         archive, ledger = fixture()
-        result = module.adopt(archive, ledger,
-                              {"email": "owner@example.test", "history_id": "900"},
-                              complete=True)
+        result = module.adopt(archive, ledger, verified_profile(ledger), complete=True)
         self.assertEqual(3, result["mapped"])
         self.assertEqual([(21, 11, "a1", 7, "old-stamp"),
                           (22, 12, "a2", 7, "old-stamp"),
@@ -66,7 +76,7 @@ class AdoptTest(unittest.TestCase):
                          archive.execute("""SELECT id, conversation_id,
                             source_message_id, embed_gen, last_modified
                             FROM messages ORDER BY id""").fetchall())
-        self.assertEqual((5, "gmail", "owner@example.test", "900", None),
+        self.assertEqual((5, "gmail", "owner@example.test", None, "{}"),
                          archive.execute("""SELECT id, source_type, identifier,
                             sync_cursor, sync_config FROM sources""").fetchone())
         self.assertEqual((11,), archive.execute("""
@@ -82,22 +92,16 @@ class AdoptTest(unittest.TestCase):
         archive, ledger = fixture()
         ledger.execute("DELETE FROM capture WHERE message_id = 23")
         with self.assertRaisesRegex(ValueError, "does not cover"):
-            module.adopt(archive, ledger,
-                         {"email": "owner@example.test", "history_id": "900"},
-                         complete=True)
+            module.adopt(archive, ledger, verified_profile(ledger), complete=True)
         self.assertEqual("imap", archive.execute("SELECT source_type FROM sources").fetchone()[0])
         ledger.execute("UPDATE capture SET gmail_id = 'a1' WHERE message_id = 22")
         with self.assertRaisesRegex(ValueError, "two archived rows"):
-            module.adopt(archive, ledger,
-                         {"email": "owner@example.test", "history_id": "900"},
-                         complete=False)
+            module.adopt(archive, ledger, verified_profile(ledger), complete=False)
         self.assertEqual("All Mail|1", archive.execute(
             "SELECT source_message_id FROM messages WHERE id = 21").fetchone()[0])
         ledger.execute("UPDATE capture SET gmail_id = NULL, status = 'missing' WHERE message_id = 22")
         with self.assertRaisesRegex(ValueError, "unresolved"):
-            module.adopt(archive, ledger,
-                         {"email": "owner@example.test", "history_id": "900"},
-                         complete=False)
+            module.adopt(archive, ledger, verified_profile(ledger), complete=False)
         archive.close()
         ledger.close()
 

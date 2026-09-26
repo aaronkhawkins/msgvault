@@ -1293,6 +1293,14 @@ CREATE TABLE IF NOT EXISTS messages (
     UNIQUE(source_id, source_message_id)
 );
 
+-- A historical IMAP message absent from the first complete native Gmail
+-- snapshot remains part of the archive. Later ordinary history recovery must
+-- not retire its search visibility or vectors on the same absence.
+CREATE TABLE IF NOT EXISTS gmail_archive_only_adoption (
+    message_id INTEGER PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE
+);
+
 -- Message recipients (To/Cc/Bcc for email, participants for group messages)
 CREATE TABLE IF NOT EXISTS message_recipients (
     id INTEGER PRIMARY KEY,

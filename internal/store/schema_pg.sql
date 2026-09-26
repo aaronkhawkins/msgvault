@@ -1205,6 +1205,11 @@ CREATE TABLE IF NOT EXISTS messages (
     UNIQUE(source_id, source_message_id)
 );
 
+CREATE TABLE IF NOT EXISTS gmail_archive_only_adoption (
+    message_id BIGINT PRIMARY KEY REFERENCES messages(id) ON DELETE CASCADE,
+    source_id BIGINT NOT NULL REFERENCES sources(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS message_recipients (
     id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
     message_id BIGINT NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
