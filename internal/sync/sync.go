@@ -1113,9 +1113,9 @@ func (s *Syncer) recoverExpiredHistory(
 			// the expired one forever; existing archived bodies are skipped.
 			options := *s.opts
 			options.NoResume = true
-			copy := *s
-			copy.opts = &options
-			s = &copy
+			freshSyncer := *s
+			freshSyncer.opts = &options
+			s = &freshSyncer
 		}
 		// A partial listing with item errors cannot become a baseline. Its
 		// checkpoint carries the error count, so resuming that prefix would
@@ -1129,9 +1129,9 @@ func (s *Syncer) recoverExpiredHistory(
 			failed.ErrorsCount > 0 {
 			options := *s.opts
 			options.NoResume = true
-			copy := *s
-			copy.opts = &options
-			s = &copy
+			freshSyncer := *s
+			freshSyncer.opts = &options
+			s = &freshSyncer
 		}
 	}
 	// The first native traversal after IMAP adoption must fill the provider gap

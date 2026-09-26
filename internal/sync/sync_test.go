@@ -2164,11 +2164,13 @@ type recoveryProfileSequenceAPI struct {
 
 type ordinaryListExcludesSpamTrashAPI struct {
 	*gmail.MockAPI
+
 	ordinaryCalls int
 }
 
 type historyExpiresOnceAPI struct {
 	*gmail.MockAPI
+
 	expireNext bool
 }
 
