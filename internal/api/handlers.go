@@ -1470,8 +1470,21 @@ func (s *Server) handleSourceStatus(w http.ResponseWriter, r *http.Request) {
 	}
 
 	statuses := make([]SourceStatus, 0, len(sources))
+	allSources := sources
+	if sourceType != "" && s.scheduler != nil {
+		for _, source := range sources {
+			if source.SourceType == "imap" {
+				allSources, err = statusStore.ListSources("")
+				if err != nil {
+					writeError(w, http.StatusInternalServerError, "internal_error", "Failed to retrieve source status")
+					return
+				}
+				break
+			}
+		}
+	}
 	for _, source := range sources {
-		status, err := s.sourceStatus(statusStore, source)
+		status, err := s.sourceStatus(statusStore, source, allSources)
 		if err != nil {
 			s.logger.Error("failed to build source sync status",
 				"source_id", source.ID,
@@ -1488,7 +1501,7 @@ func (s *Server) handleSourceStatus(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, SourceStatusResponse{Sources: statuses})
 }
 
-func (s *Server) sourceStatus(statusStore SourceStatusStore, source *store.Source) (SourceStatus, error) {
+func (s *Server) sourceStatus(statusStore SourceStatusStore, source *store.Source, allSources []*store.Source) (SourceStatus, error) {
 	status := SourceStatus{
 		ID:         source.ID,
 		SourceType: source.SourceType,
@@ -1518,12 +1531,11 @@ func (s *Server) sourceStatus(statusStore SourceStatusStore, source *store.Sourc
 			schedulerRunning = s.applyGenericJobStatus(&status, scheduling.jobName)
 		case sourceScheduleAccount:
 			account := source.Identifier
-			if source.SourceType == "imap" && !s.scheduler.IsScheduled(account) &&
-				source.DisplayName.Valid && source.DisplayName.String != "" {
+			if source.SourceType == "imap" && !s.scheduler.IsScheduled(account) {
 				// IMAP source IDs are URLs; add-imap records the scheduler's
-				// account email as the display name, which scheduled sync can
-				// also use to resolve the source.
-				account = source.DisplayName.String
+				// account email as the display name. Only use that scheduler
+				// key when it resolves to this source alone.
+				account = unambiguousIMAPScheduleAccount(allSources, source.Identifier)
 			}
 			status.Scheduled = s.scheduler.IsScheduled(account)
 			for _, scheduled := range s.scheduler.Status() {
@@ -1662,6 +1674,38 @@ func syncRunItemStatuses(items []store.SyncRunItem) []SyncRunItemStatus {
 	return out
 }
 
+// unambiguousIMAPScheduleAccount returns a display-name scheduler key only
+// when the daemon's identifier-or-display-name lookup would select exactly
+// the requested IMAP source. A shared key could sync a different source.
+func unambiguousIMAPScheduleAccount(sources []*store.Source, identifier string) string {
+	var requested *store.Source
+	for _, source := range sources {
+		if source.SourceType == "imap" && source.Identifier == identifier {
+			requested = source
+			break
+		}
+	}
+	if requested == nil || !requested.DisplayName.Valid || requested.DisplayName.String == "" {
+		return ""
+	}
+
+	account := requested.DisplayName.String
+	for _, source := range sources {
+		switch source.SourceType {
+		case "gmail", "imap", "teams", "discord":
+		default:
+			continue
+		}
+		if strings.EqualFold(source.Identifier, account) ||
+			(source.DisplayName.Valid && strings.EqualFold(source.DisplayName.String, account)) {
+			if source.ID != requested.ID {
+				return ""
+			}
+		}
+	}
+	return account
+}
+
 // handleTriggerSync manually triggers a sync for an account.
 func (s *Server) handleTriggerSync(w http.ResponseWriter, r *http.Request) {
 	if s.scheduler == nil {
@@ -1708,16 +1752,13 @@ func (s *Server) handleTriggerSync(w http.ResponseWriter, r *http.Request) {
 				writeError(w, http.StatusServiceUnavailable, "store_unavailable", "Database not available")
 				return
 			}
-			sources, err := statusStore.ListSources("imap")
+			sources, err := statusStore.ListSources("")
 			if err != nil {
 				writeError(w, http.StatusInternalServerError, "internal_error", "Failed to resolve IMAP source")
 				return
 			}
-			for _, source := range sources {
-				if source.Identifier == account && source.DisplayName.Valid {
-					schedulerAccount = source.DisplayName.String
-					break
-				}
+			if resolved := unambiguousIMAPScheduleAccount(sources, account); resolved != "" {
+				schedulerAccount = resolved
 			}
 		}
 		if !s.scheduler.IsScheduled(schedulerAccount) {

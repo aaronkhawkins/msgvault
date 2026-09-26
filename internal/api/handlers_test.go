@@ -3663,7 +3663,7 @@ func TestHandleSourceStatusIMAPUsesScheduledAccountIdentity(t *testing.T) {
 	}
 	native, err := st.GetOrCreateSource("gmail", "native@example.test")
 	requirements.NoError(err)
-	requirements.NoError(st.UpdateSourceDisplayName(native.ID, "owner@example.test"))
+	requirements.NoError(st.UpdateSourceDisplayName(native.ID, "native@example.test"))
 	srv := NewServer(&config.Config{
 		Server: config.ServerConfig{APIPort: 8080},
 		Accounts: []config.AccountSchedule{
@@ -3739,6 +3739,74 @@ func TestHandleSourceStatusIMAPUsesScheduledAccountIdentity(t *testing.T) {
 		"/api/v1/sync/"+url.PathEscape(urlScheduled)+"?source_type=imap")
 	assertions.Equal(http.StatusAccepted, trigger.Code, trigger.Body.String())
 	assertions.Equal([]string{"owner@example.test", urlScheduled}, triggered)
+}
+
+func TestHandleSourceStatusIMAPRejectsAmbiguousScheduledAccount(t *testing.T) {
+	st := testutil.NewTestStore(t)
+	sched := newMockScheduler()
+	sched.scheduled["shared@example.test"] = true
+	var triggered []string
+	sched.triggerFn = func(account string) error {
+		triggered = append(triggered, account)
+		return nil
+	}
+	firstURL := "imaps://first%40example.test@imap.example.test:993"
+	secondURL := "imaps://second%40example.test@imap.example.test:993"
+	var first *store.Source
+	for _, identifier := range []string{firstURL, secondURL} {
+		source, err := st.GetOrCreateSource("imap", identifier)
+		require.NoError(t, err)
+		require.NoError(t, st.UpdateSourceDisplayName(source.ID, "shared@example.test"))
+		if identifier == firstURL {
+			first = source
+		}
+	}
+	srv := NewServer(&config.Config{Server: config.ServerConfig{APIPort: 8080}}, st, sched, testLogger())
+
+	checkUnavailable := func(identifier string) {
+		t.Helper()
+		req := httptest.NewRequest(http.MethodGet, "/api/v1/sources/status?source_type=imap", nil)
+		w := httptest.NewRecorder()
+		srv.Router().ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		var response SourceStatusResponse
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
+		for _, source := range response.Sources {
+			if source.Identifier == identifier {
+				assert.False(t, source.Scheduled)
+				assert.False(t, source.CanSync)
+				assert.Equal(t, "sync_not_configured", source.SyncUnavailableReason)
+				return
+			}
+		}
+		require.FailNow(t, "IMAP source missing from status")
+	}
+	for _, identifier := range []string{firstURL, secondURL} {
+		checkUnavailable(identifier)
+		trigger := servePOSTTestRequest(srv,
+			"/api/v1/sync/"+url.PathEscape(identifier)+"?source_type=imap")
+		assert.Equal(t, http.StatusNotFound, trigger.Code, trigger.Body.String())
+	}
+	assert.Empty(t, triggered)
+
+	// An exact URL scheduler key remains available despite the shared name.
+	sched.scheduled[secondURL] = true
+	trigger := servePOSTTestRequest(srv,
+		"/api/v1/sync/"+url.PathEscape(secondURL)+"?source_type=imap")
+	assert.Equal(t, http.StatusAccepted, trigger.Code, trigger.Body.String())
+	assert.Equal(t, []string{secondURL}, triggered)
+
+	// A native Gmail source sharing the account name must also block fallback.
+	delete(sched.scheduled, secondURL)
+	require.NoError(t, st.UpdateSourceDisplayName(first.ID, "first@example.test"))
+	native, err := st.GetOrCreateSource("gmail", "native@example.test")
+	require.NoError(t, err)
+	require.NoError(t, st.UpdateSourceDisplayName(native.ID, "shared@example.test"))
+	checkUnavailable(secondURL)
+	trigger = servePOSTTestRequest(srv,
+		"/api/v1/sync/"+url.PathEscape(secondURL)+"?source_type=imap")
+	assert.Equal(t, http.StatusNotFound, trigger.Code, trigger.Body.String())
+	assert.Equal(t, []string{secondURL}, triggered)
 }
 
 func TestHandleSourceStatusDisablesSyncWhileSchedulerReportsAccountRunning(t *testing.T) {
