@@ -1,0 +1,208 @@
+package qdrantindex
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"time"
+)
+
+// Point is one authoritative message chunk mirrored into Qdrant.
+type Point struct {
+	ID         uint64
+	MessageID  int64
+	ChunkIndex int
+	Vector     []float32
+}
+
+type Match struct {
+	ID         uint64
+	MessageID  int64
+	ChunkIndex int
+	Score      float64
+}
+
+type Client struct {
+	base       string
+	collection string
+	http       *http.Client
+}
+
+func New(baseURL, collection string) (*Client, error) {
+	u, err := url.Parse(baseURL)
+	if err != nil || u.Scheme != "http" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return nil, errors.New("qdrant endpoint must be an http URL without credentials or query")
+	}
+	if collection == "" || strings.ContainsAny(collection, "/?# ") {
+		return nil, errors.New("invalid qdrant collection name")
+	}
+	return &Client{base: strings.TrimRight(baseURL, "/"), collection: collection, http: &http.Client{Timeout: 60 * time.Second}}, nil
+}
+
+func (c *Client) request(ctx context.Context, method, path string, body any, result any) error {
+	var reader io.Reader
+	if body != nil {
+		buf, err := json.Marshal(body)
+		if err != nil {
+			return err
+		}
+		reader = bytes.NewReader(buf)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, c.base+path, reader)
+	if err != nil {
+		return err
+	}
+	if body != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return fmt.Errorf("qdrant request: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("qdrant %s: HTTP %d", method, resp.StatusCode)
+	}
+	var envelope struct {
+		Status any             `json:"status"`
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.NewDecoder(io.LimitReader(resp.Body, 64<<20)).Decode(&envelope); err != nil {
+		return fmt.Errorf("decode qdrant response: %w", err)
+	}
+	if result != nil {
+		return json.Unmarshal(envelope.Result, result)
+	}
+	return nil
+}
+
+func (c *Client) collectionPath() string { return "/collections/" + url.PathEscape(c.collection) }
+
+func (c *Client) EnsureCollection(ctx context.Context, dimension int) error {
+	if dimension <= 0 {
+		return errors.New("invalid vector dimension")
+	}
+	var info struct {
+		Config struct {
+			Params struct {
+				Vectors struct {
+					Size     int    `json:"size"`
+					Distance string `json:"distance"`
+				} `json:"vectors"`
+			} `json:"params"`
+		} `json:"config"`
+	}
+	err := c.request(ctx, http.MethodGet, c.collectionPath(), nil, &info)
+	if err == nil {
+		if info.Config.Params.Vectors.Size != dimension || !strings.EqualFold(info.Config.Params.Vectors.Distance, "Cosine") {
+			return fmt.Errorf("qdrant collection dimension or metric mismatch")
+		}
+		return nil
+	}
+	if !strings.Contains(err.Error(), "HTTP 404") {
+		return err
+	}
+	return c.request(ctx, http.MethodPut, c.collectionPath(), map[string]any{
+		"vectors":         map[string]any{"size": dimension, "distance": "Cosine", "on_disk": true},
+		"on_disk_payload": true,
+	}, nil)
+}
+
+func (c *Client) Upsert(ctx context.Context, points []Point) error {
+	if len(points) == 0 {
+		return nil
+	}
+	type qpoint struct {
+		ID      uint64         `json:"id"`
+		Vector  []float32      `json:"vector"`
+		Payload map[string]any `json:"payload"`
+	}
+	items := make([]qpoint, len(points))
+	for i, p := range points {
+		items[i] = qpoint{ID: p.ID, Vector: p.Vector, Payload: map[string]any{"message_id": p.MessageID, "chunk_index": p.ChunkIndex}}
+	}
+	return c.request(ctx, http.MethodPut, c.collectionPath()+"/points?wait=true", map[string]any{"points": items}, nil)
+}
+
+func (c *Client) Delete(ctx context.Context, ids []uint64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	err := c.request(ctx, http.MethodPost, c.collectionPath()+"/points/delete?wait=true", map[string]any{"points": ids}, nil)
+	if err != nil && strings.Contains(err.Error(), "HTTP 404") {
+		return nil // a retired generation may never have had a collection
+	}
+	return err
+}
+
+func (c *Client) Search(ctx context.Context, vector []float32, limit int) ([]Match, error) {
+	if len(vector) == 0 || limit <= 0 {
+		return nil, errors.New("invalid qdrant search request")
+	}
+	var result struct {
+		Points []struct {
+			ID      uint64  `json:"id"`
+			Score   float64 `json:"score"`
+			Payload struct {
+				MessageID  int64 `json:"message_id"`
+				ChunkIndex int   `json:"chunk_index"`
+			} `json:"payload"`
+		} `json:"points"`
+	}
+	err := c.request(ctx, http.MethodPost, c.collectionPath()+"/points/query", map[string]any{
+		"query": vector, "limit": limit, "with_payload": []string{"message_id", "chunk_index"},
+		"params": map[string]any{"hnsw_ef": 128},
+	}, &result)
+	if err != nil {
+		return nil, err
+	}
+	matches := make([]Match, len(result.Points))
+	for i, p := range result.Points {
+		matches[i] = Match{ID: p.ID, MessageID: p.Payload.MessageID, ChunkIndex: p.Payload.ChunkIndex, Score: p.Score}
+	}
+	return matches, nil
+}
+
+func (c *Client) Count(ctx context.Context) (int64, error) {
+	var result struct {
+		Count int64 `json:"count"`
+	}
+	err := c.request(ctx, http.MethodPost, c.collectionPath()+"/points/count", map[string]any{"exact": true}, &result)
+	return result.Count, err
+}
+
+// ScrollIDs returns one ordered page of point identities without vectors or
+// payload. A nil next offset marks the end of the collection.
+func (c *Client) ScrollIDs(ctx context.Context, offset *uint64, limit int) ([]uint64, *uint64, error) {
+	body := map[string]any{"limit": limit, "with_payload": false, "with_vector": false}
+	if offset != nil {
+		body["offset"] = *offset
+	}
+	var result struct {
+		Points []struct {
+			ID uint64 `json:"id"`
+		} `json:"points"`
+		Next *uint64 `json:"next_page_offset"`
+	}
+	if err := c.request(ctx, http.MethodPost, c.collectionPath()+"/points/scroll", body, &result); err != nil {
+		return nil, nil, err
+	}
+	ids := make([]uint64, len(result.Points))
+	for i, p := range result.Points {
+		ids[i] = p.ID
+	}
+	return ids, result.Next, nil
+}
+
+func (c *Client) CollectionName() string { return c.collection }
+
+func CollectionForGeneration(prefix string, gen int64) string {
+	return prefix + "_g" + strconv.FormatInt(gen, 10)
+}

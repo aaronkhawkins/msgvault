@@ -10196,23 +10196,31 @@ func (s StageDeletionResponse) Validate() error {
 }
 
 type StatsResponse struct {
-	ActiveMessages         int64      `json:"active_messages"`
-	DatabaseSizeBytes      int64      `json:"database_size_bytes"`
-	SourceDeletedMessages  int64      `json:"source_deleted_messages"`
-	TotalAccounts          int64      `json:"total_accounts"`
-	TotalAttachments       int64      `json:"total_attachments"`
-	TotalLabels            int64      `json:"total_labels"`
-	TotalMessages          int64      `json:"total_messages"`
-	TotalThreads           int64      `json:"total_threads"`
-	VectorSearch           *StatsView `json:"vector_search,omitempty"`
-	VectorStatus           *string    `json:"vector_status,omitempty"`
-	VectorTextMessageTypes []string   `json:"vector_text_message_types,omitempty"`
-	VectorTextStatus       *string    `json:"vector_text_status,omitempty"`
-	VectorVisualStatus     *string    `json:"vector_visual_status,omitempty"`
+	ActiveMessages         int64              `json:"active_messages"`
+	DatabaseSizeBytes      int64              `json:"database_size_bytes"`
+	SourceDeletedMessages  int64              `json:"source_deleted_messages"`
+	TotalAccounts          int64              `json:"total_accounts"`
+	TotalAttachments       int64              `json:"total_attachments"`
+	TotalLabels            int64              `json:"total_labels"`
+	TotalMessages          int64              `json:"total_messages"`
+	TotalThreads           int64              `json:"total_threads"`
+	VectorIndex            *VectorIndexStatus `json:"vector_index,omitempty"`
+	VectorSearch           *StatsView         `json:"vector_search,omitempty"`
+	VectorStatus           *string            `json:"vector_status,omitempty"`
+	VectorTextMessageTypes []string           `json:"vector_text_message_types,omitempty"`
+	VectorTextStatus       *string            `json:"vector_text_status,omitempty"`
+	VectorVisualStatus     *string            `json:"vector_visual_status,omitempty"`
 }
 
 func (s StatsResponse) Validate() error {
 	var errors runtime.ValidationErrors
+	if s.VectorIndex != nil {
+		if v, ok := any(s.VectorIndex).(runtime.Validator); ok {
+			if err := v.Validate(); err != nil {
+				errors = errors.Append("VectorIndex", err)
+			}
+		}
+	}
 	if s.VectorSearch != nil {
 		if v, ok := any(s.VectorSearch).(runtime.Validator); ok {
 			if err := v.Validate(); err != nil {
@@ -11005,6 +11013,16 @@ type VectorHealth struct {
 }
 
 func (v VectorHealth) Validate() error {
+	return runtime.ConvertValidatorError(typesValidator.Struct(v))
+}
+
+type VectorIndexStatus struct {
+	Backend   string  `json:"backend" validate:"required"`
+	ErrorData *string `json:"error,omitempty"`
+	Pending   int64   `json:"pending"`
+}
+
+func (v VectorIndexStatus) Validate() error {
 	return runtime.ConvertValidatorError(typesValidator.Struct(v))
 }
 

@@ -1,0 +1,54 @@
+//go:build sqlite_vec
+
+package sqlitevec
+
+import (
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"go.kenn.io/msgvault/internal/vector"
+)
+
+func TestQdrantChangeLogTracksCommittedReplacementAndDeletion(t *testing.T) {
+	b, ctx := newBackendForTest(t)
+	require.NoError(t, b.EnableQdrantChangeLog(ctx))
+	gen, err := b.CreateGeneration(ctx, "test-model", 768, "")
+	require.NoError(t, err)
+	require.NoError(t, b.Upsert(ctx, gen, []vector.Chunk{{MessageID: 1, Vector: unitVec(768, 0)}}))
+	changes, err := b.NextQdrantChanges(ctx, 100)
+	require.NoError(t, err)
+	require.Len(t, changes, 1)
+	assert.False(t, changes[0].Delete)
+	assert.Equal(t, gen, changes[0].Generation)
+	_, messageID, chunkIndex, values, exists, err := b.QdrantPoint(ctx, changes[0].EmbeddingID)
+	require.NoError(t, err)
+	assert.True(t, exists)
+	assert.Equal(t, int64(1), messageID)
+	assert.Zero(t, chunkIndex)
+	assert.Equal(t, unitVec(768, 0), values)
+
+	require.NoError(t, b.Upsert(ctx, gen, []vector.Chunk{{MessageID: 1, Vector: unitVec(768, 1)}}))
+	changes, err = b.NextQdrantChanges(ctx, 100)
+	require.NoError(t, err)
+	require.Len(t, changes, 3)
+	assert.True(t, changes[1].Delete)
+	assert.Equal(t, changes[0].EmbeddingID, changes[1].EmbeddingID)
+	assert.False(t, changes[2].Delete)
+	_, _, _, _, exists, err = b.QdrantPoint(ctx, changes[0].EmbeddingID)
+	require.NoError(t, err)
+	assert.False(t, exists)
+	_, _, _, values, exists, err = b.QdrantPoint(ctx, changes[2].EmbeddingID)
+	require.NoError(t, err)
+	assert.True(t, exists)
+	assert.Equal(t, unitVec(768, 1), values)
+
+	require.NoError(t, b.Delete(ctx, gen, []int64{1}))
+	pending, err := b.PendingQdrantChanges(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(4), pending)
+	require.NoError(t, b.AckQdrantChanges(ctx, changes[2].Sequence))
+	pending, err = b.PendingQdrantChanges(ctx)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), pending)
+}
