@@ -158,7 +158,7 @@ func (c *Client) EnsureCollection(ctx context.Context, dimension int, sourceID s
 		return err
 	}
 	return c.request(ctx, http.MethodPut, c.collectionPath(), map[string]any{
-		"vectors":         map[string]any{"size": dimension, "distance": "Euclid", "on_disk": true},
+		"vectors":         map[string]any{"size": dimension, "distance": "Euclid", "memory": "cached"},
 		"on_disk_payload": true,
 		"metadata":        map[string]any{"source_id": sourceID, "generation_id": gen},
 	}, nil)
