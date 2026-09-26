@@ -1057,6 +1057,19 @@ func (s *Store) EnsureConversation(sourceID int64, sourceConversationID, title s
 func ensureConversation(
 	q querier, dialect Dialect, sourceID int64, sourceConversationID, title string,
 ) (int64, error) {
+	// An adopted Gmail thread may already contain IMAP messages in more than
+	// one historical conversation. Preserve those rows and route new mail to
+	// the canonical existing conversation selected during adoption.
+	var adoptedID int64
+	adoptedErr := q.QueryRow(`SELECT conversation_id FROM gmail_thread_adoption
+		WHERE source_id = ? AND gmail_thread_id = ?`,
+		sourceID, sourceConversationID).Scan(&adoptedID)
+	if adoptedErr == nil {
+		return adoptedID, nil
+	}
+	if !errors.Is(adoptedErr, sql.ErrNoRows) {
+		return 0, fmt.Errorf("lookup adopted Gmail thread: %w", adoptedErr)
+	}
 	now := dialect.Now()
 	var id int64
 	err := q.QueryRow(fmt.Sprintf(`

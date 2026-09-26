@@ -1150,6 +1150,16 @@ CREATE TABLE IF NOT EXISTS conversations (
     UNIQUE(source_id, source_conversation_id)
 );
 
+-- Native Gmail threads adopted from an IMAP archive can span several existing
+-- conversations. Route future messages to one stable row without rewriting
+-- historical conversation IDs (and their external references).
+CREATE TABLE IF NOT EXISTS gmail_thread_adoption (
+    source_id INTEGER NOT NULL REFERENCES sources(id) ON DELETE CASCADE,
+    gmail_thread_id TEXT NOT NULL,
+    conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
+    PRIMARY KEY (source_id, gmail_thread_id)
+);
+
 -- Conversation participants (who's in each conversation)
 CREATE TABLE IF NOT EXISTS conversation_participants (
     conversation_id INTEGER NOT NULL REFERENCES conversations(id) ON DELETE CASCADE,
