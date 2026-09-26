@@ -1103,7 +1103,19 @@ func (s *Syncer) recoverExpiredHistory(
 		if prior != nil && isPinnedHistoryRecovery(prior) {
 			catchupSource := *source
 			catchupSource.SyncCursor = prior.CursorAfter
-			return s.incrementalWithCompletionMode(ctx, &catchupSource, execution, true)
+			catchup, catchupErr := s.incrementalWithCompletionMode(
+				ctx, &catchupSource, execution, true)
+			if !errors.Is(catchupErr, ErrHistoryExpired) {
+				return catchup, catchupErr
+			}
+			// An interrupted cutover can outlive Gmail's pinned history
+			// boundary. Re-enumerate with a fresh boundary rather than retrying
+			// the expired one forever; existing archived bodies are skipped.
+			options := *s.opts
+			options.NoResume = true
+			copy := *s
+			copy.opts = &options
+			s = &copy
 		}
 		// A partial listing with item errors cannot become a baseline. Its
 		// checkpoint carries the error count, so resuming that prefix would
@@ -1300,10 +1312,28 @@ func (s *Syncer) full(
 	var discoveryHealth pageDiscoveryHealth
 	firstPage := true
 	pageToken := state.pageToken
+	var adoptionLister gmail.CompleteMessageSnapshotReader
+	if pinHistory && !reconcilePresence {
+		var ok bool
+		adoptionLister, ok = s.client.(gmail.CompleteMessageSnapshotReader)
+		if !ok {
+			err := errors.New("complete Gmail message listing is unavailable for adoption")
+			s.failStoppedSync(state.syncID, err)
+			return nil, err
+		}
+	}
 
 	for {
 		// List messages
-		listResp, err := s.client.ListMessages(ctx, s.opts.Query, pageToken)
+		var listResp *gmail.MessageListResponse
+		if adoptionLister != nil {
+			// The gap before the pinned history boundary may contain messages
+			// already in Spam or Trash. The ordinary ListMessages API omits
+			// those, so adoption must use the complete provider inventory.
+			listResp, err = adoptionLister.ListCompleteMessageSnapshot(ctx, pageToken)
+		} else {
+			listResp, err = s.client.ListMessages(ctx, s.opts.Query, pageToken)
+		}
 		if err != nil {
 			s.failStoppedSync(state.syncID, err)
 			return nil, fmt.Errorf("list messages: %w", err)

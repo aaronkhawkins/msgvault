@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
@@ -2161,6 +2162,46 @@ type recoveryProfileSequenceAPI struct {
 	beforeFetch func(call int)
 }
 
+type ordinaryListExcludesSpamTrashAPI struct {
+	*gmail.MockAPI
+	ordinaryCalls int
+}
+
+type historyExpiresOnceAPI struct {
+	*gmail.MockAPI
+	expireNext bool
+}
+
+func (a *historyExpiresOnceAPI) ListHistory(
+	ctx context.Context, startHistoryID uint64, pageToken string,
+) (*gmail.HistoryResponse, error) {
+	if a.expireNext {
+		a.expireNext = false
+		return nil, &gmail.NotFoundError{Path: "/history"}
+	}
+	return a.MockAPI.ListHistory(ctx, startHistoryID, pageToken)
+}
+
+func (a *ordinaryListExcludesSpamTrashAPI) ListMessages(
+	ctx context.Context, query, pageToken string,
+) (*gmail.MessageListResponse, error) {
+	a.ordinaryCalls++
+	response, err := a.MockAPI.ListMessages(ctx, query, pageToken)
+	if err != nil {
+		return nil, err
+	}
+	kept := response.Messages[:0]
+	for _, message := range response.Messages {
+		labels := a.Messages[message.ID].LabelIDs
+		if slices.Contains(labels, "SPAM") || slices.Contains(labels, "TRASH") {
+			continue
+		}
+		kept = append(kept, message)
+	}
+	response.Messages = kept
+	return response, nil
+}
+
 func (a *recoveryProfileSequenceAPI) GetProfile(context.Context) (*gmail.Profile, error) {
 	if a.beforeFetch != nil {
 		a.beforeFetch(a.calls)
@@ -2290,7 +2331,7 @@ func TestGmailAdoptionWithoutCursorReconcilesProviderGapBeforeIncremental(t *tes
 		archiveOnlyID).Scan(&retainedGeneration))
 	requirements.Equal(int64(7), retainedGeneration,
 		"first native listing must not retire historical archive vectors")
-	requirements.Positive(env.Mock.ListMessagesCalls,
+	requirements.Positive(env.Mock.SnapshotListCalls,
 		"missing cursor requires full provider enumeration")
 	refreshed, err := env.Store.GetSourceByID(source.ID)
 	requirements.NoError(err)
@@ -2313,6 +2354,34 @@ func TestGmailAdoptionWithoutCursorReconcilesProviderGapBeforeIncremental(t *tes
 	assertDeletedFromSource(t, env.Store, "historical-archive-copy", false)
 	assertRawDataExists(t, env.Store, "historical-archive-copy")
 	assertDeletedFromSource(t, env.Store, "already-archived", true)
+}
+
+func TestGmailAdoptionIncludesPreBoundarySpamAndTrash(t *testing.T) {
+	requirements := require.New(t)
+	env := newTestEnv(t)
+	seedMessages(env, 1, 1000, "already-archived")
+	runFullSync(t, env)
+	source, err := env.Store.GetSourceByIdentifier(testEmail)
+	requirements.NoError(err)
+	markSyntheticGmailAdoption(t, env, source.ID)
+	requirements.NoError(env.Store.UpdateSourceSyncCursor(source.ID, ""))
+	source, err = env.Store.GetSourceByID(source.ID)
+	requirements.NoError(err)
+	env.Mock.AddMessage("gap-spam", testMIME(), []string{"SPAM"})
+	env.Mock.AddMessage("gap-trash", testMIME(), []string{"TRASH"})
+	env.Mock.MessagePages = [][]string{{"already-archived", "gap-spam", "gap-trash"}}
+	env.Mock.Profile.HistoryID = 2000
+	env.Mock.HistoryID = 2000
+	api := &ordinaryListExcludesSpamTrashAPI{MockAPI: env.Mock}
+	syncer := New(api, env.Store, nil)
+
+	_, err = syncer.IncrementalWithHistoryRecovery(env.Context, source, nil)
+	requirements.NoError(err)
+	assertRawDataExists(t, env.Store, "gap-spam")
+	assertRawDataExists(t, env.Store, "gap-trash")
+	requirements.Zero(api.ordinaryCalls,
+		"adoption import must use the complete provider listing")
+	requirements.Positive(api.SnapshotListCalls)
 }
 
 func TestGmailAdoptionFailedReconciliationLeavesCursorEmpty(t *testing.T) {
@@ -2449,12 +2518,12 @@ func TestGmailAdoptionCatchupFailureKeepsCursorEmptyAndReusesCompletedListing(t 
 	refreshed, err := env.Store.GetSourceByID(source.ID)
 	requirements.NoError(err)
 	requirements.Empty(refreshed.SyncCursor.String)
-	listed := env.Mock.ListMessagesCalls
+	listed := env.Mock.SnapshotListCalls
 	requirements.Positive(listed)
 	env.Mock.HistoryError = nil
 	_, err = syncer.IncrementalWithHistoryRecovery(env.Context, refreshed, nil)
 	requirements.NoError(err, "retry must use the completed pinned listing")
-	requirements.Equal(listed, env.Mock.ListMessagesCalls,
+	requirements.Equal(listed, env.Mock.SnapshotListCalls,
 		"history retry must not enumerate the provider again")
 	assertRawDataExists(t, env.Store, "arrived-during-listing")
 	refreshed, err = env.Store.GetSourceByID(source.ID)
@@ -2488,14 +2557,53 @@ func TestGmailAdoptionCatchupItemFailureKeepsCursorEmpty(t *testing.T) {
 	refreshed, err := env.Store.GetSourceByID(source.ID)
 	requirements.NoError(err)
 	requirements.Empty(refreshed.SyncCursor.String)
-	listed := env.Mock.ListMessagesCalls
+	listed := env.Mock.SnapshotListCalls
 	requirements.Positive(listed)
 	delete(env.Mock.GetMessageError, "arrived-during-listing")
 	_, err = syncer.IncrementalWithHistoryRecovery(env.Context, refreshed, nil)
 	requirements.NoError(err, "retry must replay history from the pinned listing boundary")
-	requirements.Equal(listed, env.Mock.ListMessagesCalls,
+	requirements.Equal(listed, env.Mock.SnapshotListCalls,
 		"failed catch-up item must not force another complete listing")
 	assertRawDataExists(t, env.Store, "arrived-during-listing")
+	refreshed, err = env.Store.GetSourceByID(source.ID)
+	requirements.NoError(err)
+	requirements.Equal("2000", refreshed.SyncCursor.String)
+}
+
+func TestGmailAdoptionExpiredCatchupRestartsCompleteListing(t *testing.T) {
+	requirements := require.New(t)
+	env := newTestEnv(t)
+	seedMessages(env, 1, 1000, "already-archived")
+	runFullSync(t, env)
+	source, err := env.Store.GetSourceByIdentifier(testEmail)
+	requirements.NoError(err)
+	markSyntheticGmailAdoption(t, env, source.ID)
+	requirements.NoError(env.Store.UpdateSourceSyncCursor(source.ID, ""))
+	source, err = env.Store.GetSourceByID(source.ID)
+	requirements.NoError(err)
+	env.Mock.Profile.HistoryID = 2000
+	env.Mock.HistoryID = 2000
+	env.Mock.HistoryError = errors.New("synthetic initial catch-up interruption")
+	first := New(&recoveryProfileSequenceAPI{
+		MockAPI: env.Mock, historyIDs: []uint64{1500, 2000},
+	}, env.Store, nil)
+
+	_, err = first.IncrementalWithHistoryRecovery(env.Context, source, nil)
+	requirements.Error(err)
+	refreshed, err := env.Store.GetSourceByID(source.ID)
+	requirements.NoError(err)
+	requirements.Empty(refreshed.SyncCursor.String)
+	listed := env.Mock.SnapshotListCalls
+	requirements.Positive(listed)
+	env.Mock.HistoryError = nil
+	syncer := New(&historyExpiresOnceAPI{
+		MockAPI: env.Mock, expireNext: true,
+	}, env.Store, nil)
+
+	_, err = syncer.IncrementalWithHistoryRecovery(env.Context, refreshed, nil)
+	requirements.NoError(err,
+		"expired pinned history must restart a complete adoption listing")
+	requirements.Greater(env.Mock.SnapshotListCalls, listed)
 	refreshed, err = env.Store.GetSourceByID(source.ID)
 	requirements.NoError(err)
 	requirements.Equal("2000", refreshed.SyncCursor.String)
@@ -2523,11 +2631,11 @@ func TestGmailAdoptionItemFailureRestartsIncompleteListing(t *testing.T) {
 	refreshed, err := env.Store.GetSourceByID(source.ID)
 	requirements.NoError(err)
 	requirements.Empty(refreshed.SyncCursor.String)
-	listed := env.Mock.ListMessagesCalls
+	listed := env.Mock.SnapshotListCalls
 	delete(env.Mock.GetMessageError, "previously-unseen")
 	_, err = env.Syncer.IncrementalWithHistoryRecovery(env.Context, refreshed, nil)
 	requirements.NoError(err)
-	requirements.Greater(env.Mock.ListMessagesCalls, listed,
+	requirements.Greater(env.Mock.SnapshotListCalls, listed,
 		"failed listing must restart from a fresh provider boundary")
 	assertRawDataExists(t, env.Store, "previously-unseen")
 	refreshed, err = env.Store.GetSourceByID(source.ID)
