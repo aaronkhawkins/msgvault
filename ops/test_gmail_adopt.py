@@ -1,6 +1,7 @@
 import importlib.util
 from pathlib import Path
 import sqlite3
+import tempfile
 import unittest
 
 
@@ -87,6 +88,53 @@ def retained_fixture():
 
 
 class AdoptTest(unittest.TestCase):
+    def test_intervening_retained_or_source_identity_change_rejects_atomically(self):
+        class InterposingArchive:
+            def __init__(self, connection, before_lock):
+                self.connection = connection
+                self.before_lock = before_lock
+
+            def execute(self, sql, arguments=()):
+                if sql == "BEGIN IMMEDIATE":
+                    self.before_lock()
+                return self.connection.execute(sql, arguments)
+
+            def __getattr__(self, name):
+                return getattr(self.connection, name)
+
+        for changed in ("retained_row", "source_identifier"):
+            with self.subTest(changed=changed), tempfile.TemporaryDirectory() as directory:
+                fixture_archive, ledger, manifest = retained_fixture()
+                profile = verified_profile(ledger)
+                path = Path(directory) / "archive.db"
+                main = sqlite3.connect(path)
+                fixture_archive.backup(main)
+                fixture_archive.close()
+                writer = sqlite3.connect(path)
+
+                def change_identity():
+                    if changed == "retained_row":
+                        writer.execute("""UPDATE messages SET source_message_id = ?
+                            WHERE id = 22""", ("changed|2",))
+                    else:
+                        writer.execute("""UPDATE sources SET identifier = ?
+                            WHERE id = 5""", (
+                                "imaps://owner%40example.test@imap.gmail.com:993?changed=1",))
+                    writer.commit()
+
+                with self.assertRaisesRegex(ValueError, "identity changed"):
+                    module.adopt(InterposingArchive(main, change_identity), ledger,
+                                 profile, complete=True, retained_manifest=manifest)
+                self.assertEqual("imap", main.execute(
+                    "SELECT source_type FROM sources WHERE id = 5").fetchone()[0])
+                self.assertEqual("All Mail|1", main.execute(
+                    "SELECT source_message_id FROM messages WHERE id = 21").fetchone()[0])
+                self.assertIsNone(main.execute("""SELECT name FROM sqlite_master
+                    WHERE name = 'gmail_archive_only_adoption'""").fetchone())
+                writer.close()
+                main.close()
+                ledger.close()
+
     def test_explicit_retained_rows_keep_archive_refs_and_canonical_provider_identity(self):
         archive, ledger, manifest = retained_fixture()
         old_raw = archive.execute(

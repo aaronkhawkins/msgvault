@@ -100,6 +100,7 @@ def adopt(archive, ledger, profile, *, complete, retained_manifest=None):
     ).fetchone()
     if row is None or row[0] != "imap" or source_email(row[1]).lower() != email.lower():
         raise ValueError("source identity or authenticated Gmail profile differs")
+    original_identifier = row[1]
     if archive.execute(
         "SELECT 1 FROM sources WHERE source_type = 'gmail' AND lower(identifier) = lower(?)",
         (email,)).fetchone():
@@ -166,6 +167,10 @@ def adopt(archive, ledger, profile, *, complete, retained_manifest=None):
     # a partial source conversion leak into the live archive.
     archive.execute("BEGIN IMMEDIATE")
     try:
+        if archive.execute("""SELECT 1 FROM sources
+            WHERE id = ? AND source_type = 'imap' AND identifier = ?""",
+                (source_id, original_identifier)).fetchone() is None:
+            raise ValueError("source identity changed before adoption")
         if complete and archive.execute(
             "SELECT COUNT(*) FROM messages WHERE source_id = ?", (source_id,)
         ).fetchone()[0] != len(captures):
@@ -186,6 +191,10 @@ def adopt(archive, ledger, profile, *, complete, retained_manifest=None):
         """)
         for message_id, old_id, gmail_id, _thread_id, status in captures:
             if message_id in retained:
+                if archive.execute("""SELECT 1 FROM messages
+                    WHERE id = ? AND source_id = ? AND source_message_id = ?""",
+                        (message_id, source_id, old_id)).fetchone() is None:
+                    raise ValueError("retained archive identity changed during adoption")
                 archive.execute("""
                     INSERT INTO gmail_archive_only_adoption (message_id, source_id)
                     VALUES (?, ?)
@@ -206,8 +215,8 @@ def adopt(archive, ledger, profile, *, complete, retained_manifest=None):
         result = archive.execute("""
             UPDATE sources SET source_type = 'gmail', identifier = ?,
                 sync_cursor = NULL
-            WHERE id = ? AND source_type = 'imap'
-        """, (email, source_id))
+            WHERE id = ? AND source_type = 'imap' AND identifier = ?
+        """, (email, source_id, original_identifier))
         if result.rowcount != 1:
             raise ValueError("source changed during adoption")
         archive.commit()
