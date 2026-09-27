@@ -40,7 +40,29 @@ def source_email(identifier):
     return email
 
 
-def adopt(archive, ledger, profile, *, complete):
+def validate_retained_manifest(manifest, archive_uid, source_id):
+    if manifest is None:
+        return {}
+    if not isinstance(manifest, dict) or \
+            manifest.get("archive_uid") != archive_uid or \
+            manifest.get("source_id") != source_id or \
+            not isinstance(manifest.get("retained_rows"), list):
+        raise ValueError("retained manifest belongs to another archive/source")
+    retained = {}
+    for row in manifest["retained_rows"]:
+        if not isinstance(row, dict) or set(row) != {
+                "message_id", "source_message_id", "gmail_id", "reason"} or \
+                type(row["message_id"]) is not int or row["message_id"] < 1 or \
+                not isinstance(row["source_message_id"], str) or \
+                row["reason"] not in ("provider_absent", "duplicate_provider_id"):
+            raise ValueError("invalid retained manifest row")
+        if row["message_id"] in retained:
+            raise ValueError("duplicate retained manifest row")
+        retained[row["message_id"]] = row
+    return retained
+
+
+def adopt(archive, ledger, profile, *, complete, retained_manifest=None):
     """Perform one validated transaction; caller owns both SQLite handles.
 
     A partial adoption is only suitable for a disposable pilot: unadopted rows
@@ -55,6 +77,7 @@ def adopt(archive, ledger, profile, *, complete):
     if len(bindings) != 1:
         raise ValueError("capture ledger has no unique archive binding")
     archive_uid, source_id = bindings[0]
+    retained = validate_retained_manifest(retained_manifest, archive_uid, source_id)
     actual_uid = archive.execute(
         "SELECT value FROM archive_metadata WHERE key = 'archive_uid'").fetchone()
     if actual_uid is None or actual_uid[0] != archive_uid:
@@ -95,8 +118,9 @@ def adopt(archive, ledger, profile, *, complete):
         if len(captures) != count:
             raise ValueError("capture ledger does not cover the whole source")
 
-    seen_gmail = set()
+    canonical_by_gmail = {}
     canonical_threads = {}
+    retained_duplicates = []
     mapped = 0
     for message_id, old_id, gmail_id, thread_id, status in captures:
         actual = archive.execute("""
@@ -105,18 +129,37 @@ def adopt(archive, ledger, profile, *, complete):
         """, (message_id, source_id)).fetchone()
         if actual is None or actual[0] != old_id:
             raise ValueError("capture row no longer matches archived identity")
-        # A UID FETCH miss is not proof that the message disappeared from the
-        # Gmail account; it may be present under another mailbox UID. Do not
-        # silently treat it as an intentionally retained archive-only row.
+        selected = retained.get(message_id)
+        if selected is not None:
+            if selected["source_message_id"] != old_id or \
+                    selected["gmail_id"] != gmail_id:
+                raise ValueError("retained manifest no longer matches capture")
+            if selected["reason"] == "provider_absent" and \
+                    status == "missing" and gmail_id is None and thread_id is None:
+                continue
+            if selected["reason"] == "duplicate_provider_id" and \
+                    status == "mapped" and gmail_id and thread_id and \
+                    HEX_ID.fullmatch(gmail_id) and HEX_ID.fullmatch(thread_id):
+                retained_duplicates.append((gmail_id, thread_id))
+                continue
+            raise ValueError("retained row lacks the required capture evidence")
+        # A UID FETCH miss is not proof of provider absence. It requires an
+        # explicit, owner-only retained manifest after separate verification.
         if status != "mapped" or not gmail_id or not thread_id or \
                 not HEX_ID.fullmatch(gmail_id) or not HEX_ID.fullmatch(thread_id):
             raise ValueError("capture contains an unresolved or invalid mapping")
-        if gmail_id in seen_gmail:
+        if gmail_id in canonical_by_gmail:
             raise ValueError("two archived rows map to one Gmail message")
-        seen_gmail.add(gmail_id)
+        canonical_by_gmail[gmail_id] = (message_id, thread_id)
         canonical_threads[thread_id] = min(
             canonical_threads.get(thread_id, actual[1]), actual[1])
         mapped += 1
+    captured_ids = {row[0] for row in captures}
+    if any(message_id not in captured_ids for message_id in retained):
+        raise ValueError("retained manifest contains an unknown capture row")
+    if any(canonical_by_gmail.get(gmail_id, (None, None))[1] != thread_id
+           for gmail_id, thread_id in retained_duplicates):
+        raise ValueError("retained duplicate has no matching canonical Gmail row")
 
     # Lock and recheck current row identity inside the transaction. The daemon
     # must be stopped; SQLite will reject a concurrent writer rather than let
@@ -142,6 +185,12 @@ def adopt(archive, ledger, profile, *, complete):
             )
         """)
         for message_id, old_id, gmail_id, _thread_id, status in captures:
+            if message_id in retained:
+                archive.execute("""
+                    INSERT INTO gmail_archive_only_adoption (message_id, source_id)
+                    VALUES (?, ?)
+                """, (message_id, source_id))
+                continue
             result = archive.execute("""
                 UPDATE messages SET source_message_id = ?
                 WHERE id = ? AND source_id = ? AND source_message_id = ?
@@ -165,7 +214,8 @@ def adopt(archive, ledger, profile, *, complete):
     except Exception:
         archive.rollback()
         raise
-    return {"mapped": mapped, "threads_routed": len(canonical_threads),
+    return {"mapped": mapped, "retained": len(retained),
+            "threads_routed": len(canonical_threads),
             "source_id_preserved": True, "cursor_pending_full_reconciliation": True}
 
 
@@ -174,7 +224,9 @@ def main():
     parser.add_argument("--archive", type=Path, required=True)
     parser.add_argument("--ledger", type=Path, required=True)
     parser.add_argument("--profile", type=Path, required=True,
-                        help="owner-only JSON containing Gmail profile email and history_id")
+                      help="owner-only JSON containing Gmail profile email and history_id")
+    parser.add_argument("--retained-manifest", type=Path,
+                        help="owner-only explicit provider-absent and duplicate rows")
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--pilot-copy", type=Path,
                       help="disposable output database; subset adoption allowed")
@@ -187,6 +239,12 @@ def main():
     if args.profile.stat().st_mode & 0o077:
         parser.error("Gmail profile handoff must be owner-only")
     profile = json.loads(args.profile.read_text())
+    retained_manifest = None
+    if args.retained_manifest:
+        if not args.retained_manifest.is_file() or args.retained_manifest.is_symlink() or \
+                args.retained_manifest.stat().st_mode & 0o077:
+            parser.error("retained manifest must be an owner-only regular file")
+        retained_manifest = json.loads(args.retained_manifest.read_text())
     ledger = sqlite3.connect(f"file:{args.ledger.resolve()}?mode=ro", uri=True)
     try:
         if args.pilot_copy:
@@ -200,14 +258,16 @@ def main():
                 os.umask(old_umask)
             try:
                 source.backup(pilot)
-                result = adopt(pilot, ledger, profile, complete=False)
+                result = adopt(pilot, ledger, profile, complete=False,
+                               retained_manifest=retained_manifest)
             finally:
                 source.close()
                 pilot.close()
         else:
             archive = sqlite3.connect(args.archive)
             try:
-                result = adopt(archive, ledger, profile, complete=True)
+                result = adopt(archive, ledger, profile, complete=True,
+                               retained_manifest=retained_manifest)
             finally:
                 archive.close()
         print(json.dumps(result))

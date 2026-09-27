@@ -65,7 +65,108 @@ def verified_profile(ledger):
             "mapping_digest": module.mapping_digest(rows)}
 
 
+def retained_fixture():
+    archive, ledger = fixture()
+    archive.executescript("""
+        INSERT INTO message_raw VALUES (23, X'646966666572656E74');
+        INSERT INTO attachments VALUES (32, 22);
+        INSERT INTO message_embeddings VALUES (43, 23);
+    """)
+    ledger.execute("""UPDATE capture SET gmail_id = NULL,
+        gmail_thread_id = NULL, status = 'missing' WHERE message_id = 22""")
+    ledger.execute("""UPDATE capture SET gmail_id = 'a1',
+        gmail_thread_id = 'f1' WHERE message_id = 23""")
+    ledger.commit()
+    manifest = {"archive_uid": "synthetic-archive", "source_id": 5,
+                "retained_rows": [
+                    {"message_id": 22, "source_message_id": "All Mail|2",
+                     "gmail_id": None, "reason": "provider_absent"},
+                    {"message_id": 23, "source_message_id": "All Mail|3",
+                     "gmail_id": "a1", "reason": "duplicate_provider_id"}]}
+    return archive, ledger, manifest
+
+
 class AdoptTest(unittest.TestCase):
+    def test_explicit_retained_rows_keep_archive_refs_and_canonical_provider_identity(self):
+        archive, ledger, manifest = retained_fixture()
+        old_raw = archive.execute(
+            "SELECT message_id, raw_data FROM message_raw ORDER BY message_id").fetchall()
+        result = module.adopt(archive, ledger, verified_profile(ledger),
+                              complete=True, retained_manifest=manifest)
+        self.assertEqual((1, 2), (result["mapped"], result["retained"]))
+        self.assertEqual([(21, 11, "a1", 7, "old-stamp"),
+                          (22, 12, "All Mail|2", 7, "old-stamp"),
+                          (23, 12, "All Mail|3", 7, "old-stamp")],
+                         archive.execute("""SELECT id, conversation_id,
+                            source_message_id, embed_gen, last_modified
+                            FROM messages ORDER BY id""").fetchall())
+        self.assertEqual([22, 23], [row[0] for row in archive.execute("""
+            SELECT message_id FROM gmail_archive_only_adoption ORDER BY message_id
+        """)])
+        self.assertEqual(old_raw, archive.execute(
+            "SELECT message_id, raw_data FROM message_raw ORDER BY message_id").fetchall())
+        self.assertEqual(2, archive.execute("SELECT COUNT(*) FROM attachments").fetchone()[0])
+        self.assertEqual(3, archive.execute(
+            "SELECT COUNT(*) FROM message_embeddings").fetchone()[0])
+        self.assertEqual((11,), archive.execute("""
+            SELECT conversation_id FROM gmail_thread_adoption
+            WHERE source_id = 5 AND gmail_thread_id = 'f1'""").fetchone())
+        # A native provider import using the exact Gmail ID targets only the
+        # canonical row. The retained legacy copy cannot collide with it.
+        archive.execute("""INSERT OR IGNORE INTO messages
+            (id, source_id, conversation_id, source_message_id)
+            VALUES (24, 5, 11, 'a1')""")
+        self.assertEqual(3, archive.execute("SELECT COUNT(*) FROM messages").fetchone()[0])
+        with self.assertRaisesRegex(ValueError, "source identity"):
+            module.adopt(archive, ledger, verified_profile(ledger),
+                         complete=True, retained_manifest=manifest)
+        archive.close()
+        ledger.close()
+
+    def test_retained_manifest_is_exact_and_failure_rolls_back(self):
+        archive, ledger, manifest = retained_fixture()
+        profile = verified_profile(ledger)
+        for bad in (
+                {**manifest, "source_id": 99},
+                {**manifest, "retained_rows": manifest["retained_rows"][:1]},
+                {**manifest, "retained_rows": [
+                    {**manifest["retained_rows"][0], "source_message_id": "wrong"},
+                    manifest["retained_rows"][1]]},
+                {**manifest, "retained_rows": [
+                    manifest["retained_rows"][0],
+                    {**manifest["retained_rows"][1], "gmail_id": "a3"}]}):
+            with self.assertRaises(ValueError):
+                module.adopt(archive, ledger, profile, complete=True,
+                             retained_manifest=bad)
+            self.assertEqual("imap", archive.execute(
+                "SELECT source_type FROM sources").fetchone()[0])
+            self.assertEqual("All Mail|1", archive.execute(
+                "SELECT source_message_id FROM messages WHERE id=21").fetchone()[0])
+        ledger.execute("UPDATE capture SET gmail_thread_id = 'f2' WHERE message_id=23")
+        ledger.commit()
+        with self.assertRaisesRegex(ValueError, "matching canonical"):
+            module.adopt(archive, ledger, verified_profile(ledger),
+                         complete=True, retained_manifest=manifest)
+        ledger.execute("UPDATE capture SET gmail_thread_id = 'f1' WHERE message_id=23")
+        ledger.commit()
+        # A late database failure must roll back both canonical rekey and
+        # protected legacy markers, not expose a half-converted source.
+        archive.execute("""CREATE TRIGGER fail_source_adoption
+            BEFORE UPDATE ON sources BEGIN
+            SELECT RAISE(ABORT, 'synthetic source update failure'); END""")
+        with self.assertRaises(sqlite3.IntegrityError):
+            module.adopt(archive, ledger, profile, complete=True,
+                         retained_manifest=manifest)
+        self.assertEqual("imap", archive.execute(
+            "SELECT source_type FROM sources").fetchone()[0])
+        self.assertEqual("All Mail|1", archive.execute(
+            "SELECT source_message_id FROM messages WHERE id=21").fetchone()[0])
+        self.assertIsNone(archive.execute("""SELECT name FROM sqlite_master
+            WHERE name = 'gmail_archive_only_adoption'""").fetchone(),
+            "failed transaction cannot leave a partial marker table")
+        archive.close()
+        ledger.close()
+
     def test_exact_rekey_preserves_message_raw_attachment_vector_and_thread_refs(self):
         archive, ledger = fixture()
         result = module.adopt(archive, ledger, verified_profile(ledger), complete=True)
