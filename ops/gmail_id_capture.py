@@ -97,23 +97,20 @@ def open_ledger(path, archive_uid, source_id):
 
 def record(ledger, message_id, source_message_id, mailbox, epoch,
            gmail_id, gmail_thread_id, status):
-    with ledger:
-        ledger.execute("""
-            INSERT INTO capture
-              (message_id, source_message_id, mailbox, uidvalidity,
-               gmail_id, gmail_thread_id, status)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(message_id) DO UPDATE SET
-              source_message_id = excluded.source_message_id,
-              mailbox = excluded.mailbox,
-              uidvalidity = excluded.uidvalidity,
-              gmail_id = excluded.gmail_id,
-              gmail_thread_id = excluded.gmail_thread_id,
-              status = excluded.status
-        """, (message_id, source_message_id, mailbox, epoch,
-              gmail_id, gmail_thread_id, status))
-        ledger.execute("UPDATE migration SET next_before_id = MIN(next_before_id, ?)",
-                       (message_id,))
+    ledger.execute("""
+        INSERT INTO capture
+          (message_id, source_message_id, mailbox, uidvalidity,
+           gmail_id, gmail_thread_id, status)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(message_id) DO UPDATE SET
+          source_message_id = excluded.source_message_id,
+          mailbox = excluded.mailbox,
+          uidvalidity = excluded.uidvalidity,
+          gmail_id = excluded.gmail_id,
+          gmail_thread_id = excluded.gmail_thread_id,
+          status = excluded.status
+    """, (message_id, source_message_id, mailbox, epoch,
+          gmail_id, gmail_thread_id, status))
 
 
 def capture(archive, ledger, config, token, limit,
@@ -209,10 +206,18 @@ def capture(archive, ledger, config, token, limit,
                 except (imaplib.IMAP4.error, OSError, ValueError):
                     for message_id, _, _ in rows:
                         outcomes.setdefault(message_id, (mailbox, epoch, None, None, "select_error"))
-            for message_id, source_message_id in candidates:
-                mailbox, epoch, gmail_id, gmail_thread_id, status = outcomes[message_id]
-                record(ledger, message_id, source_message_id,
-                       mailbox, epoch, gmail_id, gmail_thread_id, status)
+            # Commit the capture row and its resume cursor together. A failed
+            # batch is retried from the last committed cursor on the next run.
+            for start in range(0, len(candidates), FETCH_SIZE):
+                batch = candidates[start:start + FETCH_SIZE]
+                with ledger:
+                    for message_id, source_message_id in batch:
+                        mailbox, epoch, gmail_id, gmail_thread_id, status = outcomes[message_id]
+                        record(ledger, message_id, source_message_id,
+                               mailbox, epoch, gmail_id, gmail_thread_id, status)
+                    ledger.execute(
+                        "UPDATE migration SET next_before_id = MIN(next_before_id, ?)",
+                        (min(message_id for message_id, _ in batch),))
             counts = dict(ledger.execute(
                 "SELECT status, COUNT(*) FROM capture GROUP BY status"))
             duplicates = ledger.execute("""
