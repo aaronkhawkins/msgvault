@@ -46,6 +46,62 @@ class FakeIMAP:
 
 
 class CaptureTest(unittest.TestCase):
+    def test_failed_ledger_batch_retries_from_last_committed_cursor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            archive = sqlite3.connect(Path(directory) / "archive.db")
+            archive.executescript("""
+                CREATE TABLE sources (id INTEGER PRIMARY KEY, source_type TEXT, identifier TEXT);
+                CREATE TABLE messages (id INTEGER PRIMARY KEY, source_id INTEGER, source_message_id TEXT);
+                CREATE TABLE archive_metadata (key TEXT, value TEXT);
+                CREATE TABLE imap_folder_state (source_id INTEGER, mailbox TEXT, uidvalidity INTEGER);
+                INSERT INTO sources VALUES
+                  (1, 'imap', 'imaps://synthetic%40example.test@imap.gmail.com:993');
+                INSERT INTO archive_metadata VALUES ('archive_uid', 'synthetic-archive');
+                INSERT INTO imap_folder_state VALUES (1, '[Gmail]/All Mail', 45);
+            """)
+            archive.executemany("INSERT INTO messages VALUES (?, 1, ?)",
+                                [(i, f"[Gmail]/All Mail|{i}") for i in range(1, 61)])
+            archive.commit()
+            ledger_path = Path(directory) / "mapping.db"
+            config = {"accounts": [{"email": "synthetic@example.test"}]}
+            original_record = capture_module.record
+            calls = 0
+
+            def fail_in_second_batch(*args):
+                nonlocal calls
+                calls += 1
+                if calls == 27:
+                    raise OSError("synthetic ledger write failure")
+                original_record(*args)
+
+            with patch.object(capture_module.imaplib, "IMAP4_SSL", FakeIMAP), \
+                    patch.object(FakeIMAP, "missing", set()), \
+                    patch.object(capture_module, "record", side_effect=fail_in_second_batch):
+                with self.assertRaisesRegex(OSError, "synthetic ledger write failure"):
+                    capture_module.capture(archive, ledger_path, config,
+                                           {"password": "synthetic"}, 60)
+
+            ledger = sqlite3.connect(ledger_path)
+            self.assertEqual(25, ledger.execute("SELECT COUNT(*) FROM capture").fetchone()[0])
+            self.assertEqual(36, ledger.execute(
+                "SELECT next_before_id FROM migration").fetchone()[0])
+            ledger.close()
+
+            with patch.object(capture_module.imaplib, "IMAP4_SSL", FakeIMAP), \
+                    patch.object(FakeIMAP, "missing", set()):
+                capture_module.capture(archive, ledger_path, config,
+                                       {"password": "synthetic"}, 60)
+            ledger = sqlite3.connect(ledger_path)
+            self.assertEqual((60, 60), ledger.execute("""
+                SELECT COUNT(*), COUNT(DISTINCT gmail_id) FROM capture
+            """).fetchone())
+            self.assertEqual(1, ledger.execute(
+                "SELECT next_before_id FROM migration").fetchone()[0])
+            self.assertEqual("imap", archive.execute(
+                "SELECT source_type FROM sources").fetchone()[0])
+            ledger.close()
+            archive.close()
+
     def test_resumes_after_first_batch_and_retains_missing_record(self):
         with tempfile.TemporaryDirectory() as directory:
             archive = sqlite3.connect(Path(directory) / "archive.db")
