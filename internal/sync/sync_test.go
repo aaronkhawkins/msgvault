@@ -2358,6 +2358,53 @@ func TestGmailAdoptionWithoutCursorReconcilesProviderGapBeforeIncremental(t *tes
 	assertDeletedFromSource(t, env.Store, "already-archived", true)
 }
 
+func TestGmailAdoptionPreprotectedLegacyRowSurvivesHistoryAndLaterSnapshot(t *testing.T) {
+	requirements := require.New(t)
+	env := newTestEnv(t)
+	seedMessages(env, 2, 1000, "provider-present", "legacy-imap-copy")
+	runFullSync(t, env)
+	source, err := env.Store.GetSourceByIdentifier(testEmail)
+	requirements.NoError(err)
+	markSyntheticGmailAdoption(t, env, source.ID)
+	var legacyID int64
+	requirements.NoError(env.Store.DB().QueryRow(env.Store.Rebind(`SELECT id FROM messages
+		WHERE source_id = ? AND source_message_id = ?`),
+		source.ID, "legacy-imap-copy").Scan(&legacyID))
+	_, err = env.Store.DB().Exec(env.Store.Rebind(`INSERT INTO gmail_archive_only_adoption
+		(message_id, source_id) VALUES (?, ?)`), legacyID, source.ID)
+	requirements.NoError(err)
+	requirements.NoError(env.Store.UpdateSourceSyncCursor(source.ID, ""))
+	source, err = env.Store.GetSourceByID(source.ID)
+	requirements.NoError(err)
+	delete(env.Mock.Messages, "legacy-imap-copy")
+	env.Mock.MessagePages = [][]string{{"provider-present"}}
+	env.Mock.HistoryRecords = []gmail.HistoryRecord{historyDeleted("legacy-imap-copy")}
+	env.Mock.Profile.HistoryID = 2000
+	env.Mock.HistoryID = 2000
+	syncer := New(&recoveryProfileSequenceAPI{
+		MockAPI: env.Mock, historyIDs: []uint64{1500, 2000},
+	}, env.Store, nil)
+
+	_, err = syncer.IncrementalWithHistoryRecovery(env.Context, source, nil)
+	requirements.NoError(err)
+	assertDeletedFromSource(t, env.Store, "legacy-imap-copy", false)
+	assertRawDataExists(t, env.Store, "legacy-imap-copy")
+	refreshed, err := env.Store.GetSourceByID(source.ID)
+	requirements.NoError(err)
+	requirements.Equal("2000", refreshed.SyncCursor.String)
+
+	delete(env.Mock.Messages, "provider-present")
+	env.Mock.MessagePages = [][]string{{}}
+	env.Mock.HistoryRecords = nil
+	env.Mock.Profile.HistoryID = 3000
+	env.Mock.HistoryID = 3000
+	_, err = syncer.RecoverExpiredHistory(env.Context, refreshed)
+	requirements.NoError(err)
+	assertDeletedFromSource(t, env.Store, "legacy-imap-copy", false)
+	assertRawDataExists(t, env.Store, "legacy-imap-copy")
+	assertDeletedFromSource(t, env.Store, "provider-present", true)
+}
+
 func TestGmailAdoptionIncludesPreBoundarySpamAndTrash(t *testing.T) {
 	requirements := require.New(t)
 	env := newTestEnv(t)
