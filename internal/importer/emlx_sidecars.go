@@ -165,7 +165,7 @@ func ingestEmlxSidecars(
 		}
 		if previousHash != "" && previousHash != selection.attachment.ContentHash {
 			unmatched += int64(selection.copies)
-			return stored, unmatched, errors.New("Apple Mail sidecar differs from stored MIME attachment")
+			return stored, unmatched, errors.New("stored MIME attachment differs from Apple Mail sidecar")
 		}
 		selection.existingHash = previousHash
 	}
@@ -249,8 +249,7 @@ func emlxSidecarDir(emlxPath string) string {
 }
 
 func sidecarIOError(operation string, err error) error {
-	var pathErr *os.PathError
-	if errors.As(err, &pathErr) {
+	if pathErr, ok := errors.AsType[*os.PathError](err); ok {
 		return fmt.Errorf("%s: %w", operation, pathErr.Err)
 	}
 	return fmt.Errorf("%s: %w", operation, err)
