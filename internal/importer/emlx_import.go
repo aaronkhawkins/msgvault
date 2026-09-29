@@ -69,7 +69,9 @@ type EmlxImportSummary struct {
 
 	// PartialFiles counts *.partial.emlx files parsed. Their bodies are
 	// complete; only attachment parts are uncached by Apple Mail.
-	PartialFiles int64
+	PartialFiles      int64
+	SidecarsStored    int64
+	SidecarsUnmatched int64
 
 	Errors     int64
 	HardErrors bool
@@ -233,14 +235,15 @@ func ImportEmlxDir(
 	hardErrors := false
 
 	type pendingEmlxMsg struct {
-		Raw       []byte
-		RawHash   string
-		SourceMsg string
-		LabelIDs  []int64
-		Fallback  time.Time
-		MboxIdx   int
-		MboxPath  string
-		FileName  string
+		Raw          []byte
+		RawHash      string
+		SourceMsg    string
+		LabelIDs     []int64
+		Fallback     time.Time
+		MboxIdx      int
+		MboxPath     string
+		FileName     string
+		SidecarFiles []string
 	}
 
 	const (
@@ -315,10 +318,12 @@ func ImportEmlxDir(
 
 			// Check if fully exists (with raw).
 			exists := false
+			var messageID int64
 			if batchOK {
 				msgID, ok := existingWithRaw[p.SourceMsg]
 				if ok {
 					exists = true
+					messageID = msgID
 					// Add labels from this mailbox to the existing message.
 					if len(p.LabelIDs) > 0 {
 						if err := st.AddMessageLabels(
@@ -339,6 +344,7 @@ func ImportEmlxDir(
 					summary.Errors++
 				} else if msgID, ok := one[p.SourceMsg]; ok {
 					exists = true
+					messageID = msgID
 					if len(p.LabelIDs) > 0 {
 						if err := st.AddMessageLabels(
 							msgID, p.LabelIDs,
@@ -352,6 +358,19 @@ func ImportEmlxDir(
 			}
 
 			if exists {
+				stored, unmatched, sidecarErr := ingestEmlxSidecars(
+					ctx, st, messageID, p.SidecarFiles, p.Raw,
+					opts.AttachmentsDir, opts.MaxMessageBytes,
+				)
+				summary.SidecarsStored += stored
+				summary.SidecarsUnmatched += unmatched
+				if sidecarErr != nil {
+					cp.ErrorsCount++
+					summary.Errors++
+					log.Warn("failed to ingest emlx sidecar", "error", sidecarErr)
+					checkpointBlocked = true
+					hardErrors = true
+				}
 				summary.MessagesSkipped++
 				if !checkpointBlocked {
 					lastCpMbox = p.MboxIdx
@@ -387,6 +406,30 @@ func ImportEmlxDir(
 				checkpointBlocked = true
 				hardErrors = true
 				continue
+			}
+			if opts.AttachmentsDir != "" {
+				one, lookupErr := st.MessageExistsWithRawBatch(src.ID, []string{p.SourceMsg})
+				if lookupErr != nil {
+					cp.ErrorsCount++
+					summary.Errors++
+					checkpointBlocked = true
+					hardErrors = true
+					log.Warn("failed to find ingested message for emlx sidecars", "error", lookupErr)
+				} else if messageID, ok := one[p.SourceMsg]; ok {
+					stored, unmatched, sidecarErr := ingestEmlxSidecars(
+						ctx, st, messageID, p.SidecarFiles, p.Raw,
+						opts.AttachmentsDir, opts.MaxMessageBytes,
+					)
+					summary.SidecarsStored += stored
+					summary.SidecarsUnmatched += unmatched
+					if sidecarErr != nil {
+						cp.ErrorsCount++
+						summary.Errors++
+						checkpointBlocked = true
+						hardErrors = true
+						log.Warn("failed to ingest emlx sidecar", "error", sidecarErr)
+					}
+				}
 			}
 
 			if alreadyExists {
@@ -506,17 +549,19 @@ func ImportEmlxDir(
 					}
 				}
 				pending[idx].LabelIDs = existing
+				pending[idx].SidecarFiles = append(pending[idx].SidecarFiles, filePath)
 			} else {
 				pendingIdx[sourceMsgID] = len(pending)
 				pending = append(pending, pendingEmlxMsg{
-					Raw:       msg.Raw,
-					RawHash:   rawHash,
-					SourceMsg: sourceMsgID,
-					LabelIDs:  labelIDs,
-					Fallback:  fallbackDate,
-					MboxIdx:   mboxIdx,
-					MboxPath:  mb.Path,
-					FileName:  filePath,
+					Raw:          msg.Raw,
+					RawHash:      rawHash,
+					SourceMsg:    sourceMsgID,
+					LabelIDs:     labelIDs,
+					Fallback:     fallbackDate,
+					MboxIdx:      mboxIdx,
+					MboxPath:     mb.Path,
+					FileName:     filePath,
+					SidecarFiles: []string{filePath},
 				})
 				pendingBytes += int64(len(msg.Raw))
 			}

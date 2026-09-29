@@ -376,6 +376,8 @@ func importAutoAccounts(
 		grandTotal.MessagesUpdated += summary.MessagesUpdated
 		grandTotal.MessagesSkipped += summary.MessagesSkipped
 		grandTotal.PartialFiles += summary.PartialFiles
+		grandTotal.SidecarsStored += summary.SidecarsStored
+		grandTotal.SidecarsUnmatched += summary.SidecarsUnmatched
 		grandTotal.Errors += summary.Errors
 		if summary.HardErrors {
 			grandTotal.HardErrors = true
@@ -452,8 +454,14 @@ func printImportStats(out io.Writer, summary importer.EmlxImportSummary) {
 	)
 	if summary.PartialFiles > 0 {
 		_, _ = fmt.Fprintf(out,
-			"  Partial files:  %d (body imported; attachments not cached by Apple Mail)\n",
+			"  Partial files:  %d (some attachment parts may be uncached)\n",
 			summary.PartialFiles,
+		)
+	}
+	if summary.SidecarsStored > 0 || summary.SidecarsUnmatched > 0 {
+		_, _ = fmt.Fprintf(out,
+			"  Sidecars:       %d stored, %d unmatched\n",
+			summary.SidecarsStored, summary.SidecarsUnmatched,
 		)
 	}
 	_, _ = fmt.Fprintf(out,

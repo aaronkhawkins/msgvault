@@ -769,6 +769,17 @@ complete even when uncached attachment parts are absent. If both `N.emlx` and
 `N.partial.emlx` exist, the complete `N.emlx` copy wins. The command summary
 reports the number of partial files imported.
 
+For Apple Mail layouts with `Attachments/<message number>/<part number>/`,
+the importer also stores a sidecar when its filename uniquely matches an
+empty MIME attachment in the corresponding `.emlx`. Unmatched sidecars are
+counted in the command summary and left untouched. Rerunning the import can
+fill in sidecars that appeared after the message body was imported. Apple Mail
+may not have downloaded every attachment, so this is not a complete source
+archive unless the source files themselves are complete.
+If two copies of a message provide different bytes for the same MIME part,
+or a sidecar changes after its bytes were stored, the importer reports an
+error and leaves the stored attachment unchanged.
+
 | Flag | Default | Description |
 |---|---|---|
 | `--source-type` | `apple-mail` | Source type recorded in database |
