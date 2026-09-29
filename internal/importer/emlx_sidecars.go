@@ -31,9 +31,11 @@ func ingestEmlxSidecars(
 	}
 	var parsed *mime.Message
 	type sidecarResolution struct {
-		attachment mime.Attachment
-		copies     int
-		conflict   bool
+		attachment   mime.Attachment
+		path         string
+		existingHash string
+		copies       int
+		conflict     bool
 	}
 	resolved := make(map[string]*sidecarResolution)
 	var order []string
@@ -122,11 +124,8 @@ func ingestEmlxSidecars(
 			if openErr != nil {
 				return stored, unmatched, sidecarIOError("open Apple Mail sidecar", openErr)
 			}
-			limit := maxBytes
-			if limit < math.MaxInt64 {
-				limit++
-			}
-			content, readErr := io.ReadAll(io.LimitReader(file, limit))
+			hasher := sha256.New()
+			size, readErr := io.Copy(hasher, io.LimitReader(file, sidecarReadLimit(maxBytes)))
 			closeErr := file.Close()
 			if readErr != nil {
 				return stored, unmatched, sidecarIOError("read Apple Mail sidecar", readErr)
@@ -134,14 +133,13 @@ func ingestEmlxSidecars(
 			if closeErr != nil {
 				return stored, unmatched, sidecarIOError("close Apple Mail sidecar", closeErr)
 			}
-			if int64(len(content)) > maxBytes {
+			if size > maxBytes {
 				unmatched++
 				continue
 			}
 			att := *match
-			att.Content = content
-			hash := sha256.Sum256(content)
-			att.ContentHash = hex.EncodeToString(hash[:])
+			att.Content = nil
+			att.ContentHash = hex.EncodeToString(hasher.Sum(nil))
 			if prior, ok := resolved[occurrence]; ok {
 				prior.copies++
 				if prior.attachment.ContentHash != att.ContentHash {
@@ -149,7 +147,7 @@ func ingestEmlxSidecars(
 				}
 				continue
 			}
-			resolved[occurrence] = &sidecarResolution{attachment: att, copies: 1}
+			resolved[occurrence] = &sidecarResolution{attachment: att, path: candidate.path, copies: 1}
 			order = append(order, occurrence)
 		}
 	}
@@ -160,15 +158,44 @@ func ingestEmlxSidecars(
 		}
 	}
 	for _, key := range order {
-		att := &resolved[key].attachment
-		previousHash, lookupErr := existingSidecarHash(ctx, st, messageID, att)
+		selection := resolved[key]
+		previousHash, lookupErr := existingSidecarHash(ctx, st, messageID, &selection.attachment)
 		if lookupErr != nil {
 			return stored, unmatched, fmt.Errorf("check Apple Mail sidecar occurrence: %w", lookupErr)
 		}
-		if storeErr := storeAttachment(st, attachmentsDir, messageID, att); storeErr != nil {
+		if previousHash != "" && previousHash != selection.attachment.ContentHash {
+			unmatched += int64(selection.copies)
+			return stored, unmatched, errors.New("Apple Mail sidecar differs from stored MIME attachment")
+		}
+		selection.existingHash = previousHash
+	}
+	for _, key := range order {
+		selection := resolved[key]
+		file, openErr := os.Open(selection.path)
+		if openErr != nil {
+			return stored, unmatched, sidecarIOError("open selected Apple Mail sidecar", openErr)
+		}
+		content, readErr := io.ReadAll(io.LimitReader(file, sidecarReadLimit(maxBytes)))
+		closeErr := file.Close()
+		if readErr != nil {
+			return stored, unmatched, sidecarIOError("read selected Apple Mail sidecar", readErr)
+		}
+		if closeErr != nil {
+			return stored, unmatched, sidecarIOError("close selected Apple Mail sidecar", closeErr)
+		}
+		if int64(len(content)) > maxBytes {
+			return stored, unmatched, errors.New("selected Apple Mail sidecar exceeds size limit")
+		}
+		hash := sha256.Sum256(content)
+		if hex.EncodeToString(hash[:]) != selection.attachment.ContentHash {
+			return stored, unmatched, errors.New("selected Apple Mail sidecar changed during import")
+		}
+		att := selection.attachment
+		att.Content = content
+		if storeErr := storeAttachment(st, attachmentsDir, messageID, &att); storeErr != nil {
 			return stored, unmatched, errors.New("store Apple Mail sidecar")
 		}
-		if previousHash != att.ContentHash {
+		if selection.existingHash == "" {
 			stored++
 		}
 	}
@@ -183,6 +210,13 @@ func ingestEmlxSidecars(
 		}
 	}
 	return stored, unmatched, nil
+}
+
+func sidecarReadLimit(maxBytes int64) int64 {
+	if maxBytes == math.MaxInt64 {
+		return maxBytes
+	}
+	return maxBytes + 1
 }
 
 func existingSidecarHash(ctx context.Context, st *store.Store, messageID int64, att *mime.Attachment) (string, error) {

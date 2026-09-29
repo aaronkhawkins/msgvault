@@ -776,6 +776,9 @@ counted in the command summary and left untouched. Rerunning the import can
 fill in sidecars that appeared after the message body was imported. Apple Mail
 may not have downloaded every attachment, so this is not a complete source
 archive unless the source files themselves are complete.
+If two copies of a message provide different bytes for the same MIME part,
+or a sidecar changes after its bytes were stored, the importer reports an
+error and leaves the stored attachment unchanged.
 
 | Flag | Default | Description |
 |---|---|---|

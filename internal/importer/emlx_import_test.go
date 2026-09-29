@@ -367,9 +367,15 @@ func TestImportEmlxDir_AppleMailSidecarAttachment(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(sidecarDir, "event.ics"), updatedContent, 0600))
 	updated, err := ImportEmlxDir(context.Background(), st, root, opts)
 	require.NoError(t, err)
-	assert.Equal(t, int64(1), updated.SidecarsStored)
+	assert.True(t, updated.HardErrors)
+	assert.Zero(t, updated.SidecarsStored)
+	assert.Equal(t, int64(1), updated.SidecarsUnmatched)
 	require.NoError(t, st.DB().QueryRow(`SELECT COUNT(*) FROM attachments`).Scan(&count))
 	assert.Equal(t, 1, count)
+	got, err = os.ReadFile(filepath.Join(opts.AttachmentsDir, path))
+	require.NoError(t, err)
+	assert.Equal(t, content, got)
+	require.NoError(t, os.WriteFile(filepath.Join(sidecarDir, "event.ics"), content, 0600))
 
 	otherDir := filepath.Join(dataDir, "Attachments", "42", "2")
 	require.NoError(t, os.MkdirAll(otherDir, 0700))
@@ -426,6 +432,39 @@ func TestImportEmlxDir_DuplicateRawUsesLaterSidecarLocation(t *testing.T) {
 	var currentHash string
 	require.NoError(t, st.DB().QueryRow(`SELECT content_hash FROM attachments LIMIT 1`).Scan(&currentHash))
 	assert.Equal(t, originalHash, currentHash)
+}
+
+func TestImportEmlxDir_DuplicateRawAcrossMailboxesRejectsDifferentSidecarBytes(t *testing.T) {
+	st, tmp := openTestStore(t)
+	root := filepath.Join(tmp, "Mail")
+	raw := []byte("From: Alice <alice@example.com>\r\nSubject: Duplicate\r\nMessage-ID: <duplicate@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=outer\r\n\r\n--outer\r\nContent-Type: text/plain\r\n\r\nBody\r\n--outer\r\nContent-Type: text/calendar; name=event.ics\r\nContent-Disposition: attachment; filename=event.ics\r\n\r\n\r\n--outer--\r\n")
+	for i, box := range []string{"A.mbox", "B.mbox"} {
+		dataDir := filepath.Join(root, box, "00000000-0000-0000-0000-000000000001", "Data", "1")
+		msgDir := filepath.Join(dataDir, "Messages")
+		require.NoError(t, os.MkdirAll(msgDir, 0700))
+		mkEmlx(t, msgDir, "42.partial.emlx", raw)
+		sidecarDir := filepath.Join(dataDir, "Attachments", "42", "1")
+		require.NoError(t, os.MkdirAll(sidecarDir, 0700))
+		content := []byte("first content")
+		if i == 1 {
+			content = []byte("different content")
+		}
+		require.NoError(t, os.WriteFile(filepath.Join(sidecarDir, "event.ics"), content, 0600))
+	}
+	opts := EmlxImportOptions{Identifier: "alice@example.com", AttachmentsDir: filepath.Join(tmp, "attachments")}
+	summary, err := ImportEmlxDir(context.Background(), st, root, opts)
+	require.NoError(t, err)
+	assert.True(t, summary.HardErrors)
+	assert.Equal(t, int64(1), summary.SidecarsStored)
+	assert.Equal(t, int64(1), summary.SidecarsUnmatched)
+	var count int
+	require.NoError(t, st.DB().QueryRow(`SELECT COUNT(*) FROM attachments`).Scan(&count))
+	assert.Equal(t, 1, count)
+	var path string
+	require.NoError(t, st.DB().QueryRow(`SELECT storage_path FROM attachments LIMIT 1`).Scan(&path))
+	stored, err := os.ReadFile(filepath.Join(opts.AttachmentsDir, path))
+	require.NoError(t, err)
+	assert.Equal(t, []byte("first content"), stored)
 }
 
 func TestImportEmlxDir_NoMailboxes(t *testing.T) {
