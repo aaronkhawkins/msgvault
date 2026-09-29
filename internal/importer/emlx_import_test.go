@@ -318,6 +318,60 @@ func TestImportEmlxDir_PartialEmlxImported(t *testing.T) {
 	require.Equal([]string{"Attachments not cached", "Hello"}, subjects)
 }
 
+func TestImportEmlxDir_AppleMailSidecarAttachment(t *testing.T) {
+	st, tmp := openTestStore(t)
+	root := filepath.Join(tmp, "Mail")
+	dataDir := filepath.Join(root, "Test.mbox", "00000000-0000-0000-0000-000000000001", "Data", "1", "2", "3")
+	msgDir := filepath.Join(dataDir, "Messages")
+	require.NoError(t, os.MkdirAll(msgDir, 0700))
+	raw := []byte("From: Alice <alice@example.com>\r\nTo: Bob <bob@example.com>\r\nSubject: Sidecar\r\nMessage-ID: <sidecar@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=outer\r\n\r\n--outer\r\nContent-Type: text/plain\r\n\r\nBody\r\n--outer\r\nContent-Type: text/calendar; name=event.ics\r\nContent-Disposition: attachment; filename=event.ics\r\n\r\n\r\n--outer--\r\n")
+	mkEmlx(t, msgDir, "42.partial.emlx", raw)
+	opts := EmlxImportOptions{Identifier: "alice@example.com", AttachmentsDir: filepath.Join(tmp, "attachments")}
+	first, err := ImportEmlxDir(context.Background(), st, root, opts)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), first.MessagesAdded)
+	var count int
+	require.NoError(t, st.DB().QueryRow(`SELECT COUNT(*) FROM attachments`).Scan(&count))
+	assert.Equal(t, 0, count)
+
+	sidecarDir := filepath.Join(dataDir, "Attachments", "42", "1")
+	require.NoError(t, os.MkdirAll(sidecarDir, 0700))
+	content := []byte("BEGIN:VCALENDAR\nEND:VCALENDAR\n")
+	require.NoError(t, os.WriteFile(filepath.Join(sidecarDir, "event.ics"), content, 0600))
+
+	second, err := ImportEmlxDir(context.Background(), st, root, opts)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), second.MessagesSkipped)
+	assert.Equal(t, int64(1), second.SidecarsStored)
+	require.NoError(t, st.DB().QueryRow(`SELECT COUNT(*) FROM attachments`).Scan(&count))
+	assert.Equal(t, 1, count)
+	var hasAttachments bool
+	var attachmentCount int
+	require.NoError(t, st.DB().QueryRow(`SELECT has_attachments, attachment_count FROM messages LIMIT 1`).Scan(&hasAttachments, &attachmentCount))
+	assert.True(t, hasAttachments)
+	assert.Equal(t, 1, attachmentCount)
+	var path string
+	require.NoError(t, st.DB().QueryRow(`SELECT storage_path FROM attachments LIMIT 1`).Scan(&path))
+	got, err := os.ReadFile(filepath.Join(opts.AttachmentsDir, path))
+	require.NoError(t, err)
+	assert.Equal(t, content, got)
+
+	third, err := ImportEmlxDir(context.Background(), st, root, opts)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), third.MessagesSkipped)
+	require.NoError(t, st.DB().QueryRow(`SELECT COUNT(*) FROM attachments`).Scan(&count))
+	assert.Equal(t, 1, count)
+
+	otherDir := filepath.Join(dataDir, "Attachments", "42", "2")
+	require.NoError(t, os.MkdirAll(otherDir, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(otherDir, "unmatched.ics"), []byte("unmatched"), 0600))
+	fourth, err := ImportEmlxDir(context.Background(), st, root, opts)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), fourth.SidecarsUnmatched)
+	require.NoError(t, st.DB().QueryRow(`SELECT COUNT(*) FROM attachments`).Scan(&count))
+	assert.Equal(t, 1, count)
+}
+
 func TestImportEmlxDir_NoMailboxes(t *testing.T) {
 	st, tmp := openTestStore(t)
 
