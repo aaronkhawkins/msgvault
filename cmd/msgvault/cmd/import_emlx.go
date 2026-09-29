@@ -22,6 +22,7 @@ var (
 	importEmlxNoResume           bool
 	importEmlxCheckpointInterval int
 	importEmlxNoAttachments      bool
+	importEmlxBulkSQLite         bool
 	importEmlxAccountsDB         string
 	importEmlxAccounts           []string
 	importEmlxIdentifier         string
@@ -59,6 +60,10 @@ Examples:
 
   # Legacy two-arg form (deprecated, still works)
   msgvault import-emlx me@gmail.com ~/Library/Mail/V10/SOME-GUID
+
+For a large, replayable SQLite import, --bulk-sqlite uses WAL synchronous=NORMAL
+in this import process. A host crash can lose recent commits; keep the original
+.emlx files until the import finishes and create and verify a backup afterward.
 	`,
 	Args: cobra.MaximumNArgs(2),
 	RunE: func(cmd *cobra.Command, args []string) error {
@@ -150,7 +155,7 @@ Examples:
 			}
 		}()
 
-		st, cleanup, err := openWritableStoreAndInitForIngest()
+		st, cleanup, err := openWritableStoreAndInitForEmlxImport(importEmlxBulkSQLite)
 		if err != nil {
 			return err
 		}
@@ -475,6 +480,10 @@ func init() {
 	importEmlxCmd.Flags().BoolVar(
 		&importEmlxNoAttachments, "no-attachments", false,
 		"Do not store attachments on disk",
+	)
+	importEmlxCmd.Flags().BoolVar(
+		&importEmlxBulkSQLite, "bulk-sqlite", false,
+		"Use SQLite WAL synchronous=NORMAL for a replayable bulk import (reduced crash durability)",
 	)
 	importEmlxCmd.Flags().StringVar(
 		&importEmlxAccountsDB, "accounts-db", applemail.DefaultAccountsDBPath(),

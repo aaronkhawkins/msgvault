@@ -132,6 +132,38 @@ func openWritableStoreAndInitForIngest() (*store.Store, func(), error) {
 	return openWritableStoreAndInitWith(runStartupMigrationsForIngest)
 }
 
+func openWritableStoreAndInitForEmlxImport(bulk bool) (*store.Store, func(), error) {
+	if !bulk {
+		return openWritableStoreAndInitForIngest()
+	}
+
+	// Schema initialization and startup migrations are not replayable source
+	// imports. Finish them with the default FULL durability before opening the
+	// import connection at NORMAL, holding the write-owner lock throughout.
+	release, err := acquireDirectSQLiteWriteLock(cfg)
+	if err != nil {
+		return nil, nil, err
+	}
+	initialized, err := openStoreAndInitWith(runStartupMigrationsForIngest)
+	if err != nil {
+		release()
+		return nil, nil, err
+	}
+	if err := initialized.Close(); err != nil {
+		release()
+		return nil, nil, fmt.Errorf("close initialized database: %w", err)
+	}
+	st, err := store.OpenForBulkImport(cfg.DatabaseDSN())
+	if err != nil {
+		release()
+		return nil, nil, fmt.Errorf("open bulk-import database: %w", err)
+	}
+	return st, func() {
+		_ = st.Close()
+		release()
+	}, nil
+}
+
 func openWritableStoreAndInitWith(migrate func(*store.Store) error) (*store.Store, func(), error) {
 	release, err := acquireDirectSQLiteWriteLock(cfg)
 	if err != nil {
