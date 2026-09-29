@@ -140,7 +140,15 @@ msgvault import-emlx me@gmail.com ~/Mail/INBOX.mbox/
 | `--no-resume` | `false` | Start fresh instead of resuming an interrupted import |
 | `--checkpoint-interval` | `200` | Save progress every N messages |
 | `--no-attachments` | `false` | Skip writing attachments to disk (messages still record attachment metadata) |
+| `--bulk-sqlite` | `false` | Use SQLite WAL `synchronous=NORMAL` for this import process; PostgreSQL is unchanged |
 | `--no-default-identity` | `false` | Do not auto-confirm the identifier as this source's "me" identity |
+
+For a large import from retained `.emlx` files, `--bulk-sqlite` reduces the
+number of disk syncs. SQLite remains consistent after a crash, but a host power
+loss can lose recently committed messages. Keep the source files available to
+resume or repeat the import, then run `msgvault backup create` and
+`msgvault backup verify` after it completes. Normal daemon writes and imports
+without this flag retain the default SQLite `synchronous=FULL` setting.
 
 ### How Apple Mail organizes files
 
