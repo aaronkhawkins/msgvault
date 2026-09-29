@@ -118,6 +118,11 @@ type Store struct {
 // fcntl) and a no-op on other platforms.
 const defaultSQLiteParams = "?_journal_mode=WAL&_busy_timeout=30000&_synchronous=FULL&_fullfsync=true&_foreign_keys=ON"
 
+// bulkImportSQLiteParams keeps WAL crash consistency while allowing a large,
+// replayable import to avoid syncing every committed transaction to disk.
+// Only an explicitly opted-in importer should use this connection mode.
+const bulkImportSQLiteParams = "?_journal_mode=WAL&_busy_timeout=30000&_synchronous=NORMAL&_foreign_keys=ON"
+
 // isSQLiteError checks if err is a sqlite3.Error with a message containing substr.
 // This is more robust than strings.Contains on err.Error() because it first
 // type-asserts to the specific driver error type using errors.As.
@@ -159,6 +164,16 @@ func Open(dbPath string) (*Store, error) {
 		return openPostgres(dbPath)
 	}
 	return openSQLite(dbPath, defaultSQLiteParams)
+}
+
+// OpenForBulkImport opens a replayable import with reduced SQLite durability.
+// A power loss can discard recently committed transactions; the source must be
+// retained so the import can be resumed. PostgreSQL uses its normal settings.
+func OpenForBulkImport(dbPath string) (*Store, error) {
+	if IsPostgresURL(dbPath) {
+		return openPostgres(dbPath)
+	}
+	return openSQLite(dbPath, bulkImportSQLiteParams)
 }
 
 // OpenForTest opens or creates a database tuned for test use: ephemeral,
