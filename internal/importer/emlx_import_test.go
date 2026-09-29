@@ -359,6 +359,15 @@ func TestImportEmlxDir_AppleMailSidecarAttachment(t *testing.T) {
 	third, err := ImportEmlxDir(context.Background(), st, root, opts)
 	require.NoError(t, err)
 	assert.Equal(t, int64(1), third.MessagesSkipped)
+	assert.Zero(t, third.SidecarsStored)
+	require.NoError(t, st.DB().QueryRow(`SELECT COUNT(*) FROM attachments`).Scan(&count))
+	assert.Equal(t, 1, count)
+
+	updatedContent := []byte("BEGIN:VCALENDAR\nVERSION:2.0\nEND:VCALENDAR\n")
+	require.NoError(t, os.WriteFile(filepath.Join(sidecarDir, "event.ics"), updatedContent, 0600))
+	updated, err := ImportEmlxDir(context.Background(), st, root, opts)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), updated.SidecarsStored)
 	require.NoError(t, st.DB().QueryRow(`SELECT COUNT(*) FROM attachments`).Scan(&count))
 	assert.Equal(t, 1, count)
 
@@ -367,9 +376,56 @@ func TestImportEmlxDir_AppleMailSidecarAttachment(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(otherDir, "unmatched.ics"), []byte("unmatched"), 0600))
 	fourth, err := ImportEmlxDir(context.Background(), st, root, opts)
 	require.NoError(t, err)
+	assert.Zero(t, fourth.SidecarsStored)
 	assert.Equal(t, int64(1), fourth.SidecarsUnmatched)
 	require.NoError(t, st.DB().QueryRow(`SELECT COUNT(*) FROM attachments`).Scan(&count))
 	assert.Equal(t, 1, count)
+}
+
+func TestImportEmlxDir_DuplicateRawUsesLaterSidecarLocation(t *testing.T) {
+	st, tmp := openTestStore(t)
+	root := filepath.Join(tmp, "Mail")
+	dataDir := filepath.Join(root, "Test.mbox", "00000000-0000-0000-0000-000000000001", "Data")
+	firstDir := filepath.Join(dataDir, "1", "Messages")
+	secondDir := filepath.Join(dataDir, "2", "Messages")
+	require.NoError(t, os.MkdirAll(firstDir, 0700))
+	require.NoError(t, os.MkdirAll(secondDir, 0700))
+	raw := []byte("From: Alice <alice@example.com>\r\nSubject: Duplicate\r\nMessage-ID: <duplicate@example.com>\r\nMIME-Version: 1.0\r\nContent-Type: multipart/mixed; boundary=outer\r\n\r\n--outer\r\nContent-Type: text/plain\r\n\r\nBody\r\n--outer\r\nContent-Type: text/calendar; name=event.ics\r\nContent-Disposition: attachment; filename=event.ics\r\n\r\n\r\n--outer--\r\n")
+	mkEmlx(t, firstDir, "11.partial.emlx", raw)
+	mkEmlx(t, secondDir, "22.partial.emlx", raw)
+	sidecarDir := filepath.Join(dataDir, "2", "Attachments", "22", "1")
+	require.NoError(t, os.MkdirAll(sidecarDir, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(sidecarDir, "event.ics"), []byte("BEGIN:VCALENDAR\nEND:VCALENDAR\n"), 0600))
+
+	opts := EmlxImportOptions{Identifier: "alice@example.com", AttachmentsDir: filepath.Join(tmp, "attachments")}
+	first, err := ImportEmlxDir(context.Background(), st, root, opts)
+	require.NoError(t, err)
+	assert.Equal(t, int64(1), first.MessagesAdded)
+	assert.Equal(t, int64(1), first.SidecarsStored)
+	var count int
+	require.NoError(t, st.DB().QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&count))
+	assert.Equal(t, 1, count)
+	require.NoError(t, st.DB().QueryRow(`SELECT COUNT(*) FROM attachments`).Scan(&count))
+	assert.Equal(t, 1, count)
+
+	second, err := ImportEmlxDir(context.Background(), st, root, opts)
+	require.NoError(t, err)
+	assert.Zero(t, second.SidecarsStored)
+	require.NoError(t, st.DB().QueryRow(`SELECT COUNT(*) FROM attachments`).Scan(&count))
+	assert.Equal(t, 1, count)
+	var originalHash string
+	require.NoError(t, st.DB().QueryRow(`SELECT content_hash FROM attachments LIMIT 1`).Scan(&originalHash))
+	conflictingDir := filepath.Join(dataDir, "1", "Attachments", "11", "1")
+	require.NoError(t, os.MkdirAll(conflictingDir, 0700))
+	require.NoError(t, os.WriteFile(filepath.Join(conflictingDir, "event.ics"), []byte("different content"), 0600))
+	conflicted, err := ImportEmlxDir(context.Background(), st, root, opts)
+	require.NoError(t, err)
+	assert.True(t, conflicted.HardErrors)
+	assert.Zero(t, conflicted.SidecarsStored)
+	assert.Equal(t, int64(2), conflicted.SidecarsUnmatched)
+	var currentHash string
+	require.NoError(t, st.DB().QueryRow(`SELECT content_hash FROM attachments LIMIT 1`).Scan(&currentHash))
+	assert.Equal(t, originalHash, currentHash)
 }
 
 func TestImportEmlxDir_NoMailboxes(t *testing.T) {

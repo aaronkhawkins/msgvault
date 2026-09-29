@@ -3,9 +3,12 @@ package importer
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -21,101 +24,153 @@ import (
 // to an empty MIME attachment is required before the sidecar is accepted.
 func ingestEmlxSidecars(
 	ctx context.Context, st *store.Store, messageID int64,
-	emlxPath string, raw []byte, attachmentsDir string, maxBytes int64,
+	emlxPaths []string, raw []byte, attachmentsDir string, maxBytes int64,
 ) (stored, unmatched int64, err error) {
 	if attachmentsDir == "" {
 		return 0, 0, nil
 	}
-	sidecarDir := emlxSidecarDir(emlxPath)
-	if sidecarDir == "" {
-		return 0, 0, nil
+	var parsed *mime.Message
+	type sidecarResolution struct {
+		attachment mime.Attachment
+		copies     int
+		conflict   bool
 	}
-	partDirs, readErr := os.ReadDir(sidecarDir)
-	if os.IsNotExist(readErr) {
-		return 0, 0, nil
-	}
-	if readErr != nil {
-		return 0, 0, sidecarIOError("read Apple Mail sidecar directory", readErr)
-	}
-	parsed, parseErr := mime.Parse(raw)
-	if parseErr != nil {
-		return 0, 0, errors.New("parse MIME for Apple Mail sidecars")
-	}
-
-	type candidate struct{ path, name string }
-	var candidates []candidate
-	nameCounts := make(map[string]int)
-	for _, part := range partDirs {
-		if !part.IsDir() {
-			unmatched++
+	resolved := make(map[string]*sidecarResolution)
+	var order []string
+	for _, emlxPath := range emlxPaths {
+		sidecarDir := emlxSidecarDir(emlxPath)
+		if sidecarDir == "" {
 			continue
 		}
-		if _, parseErr := strconv.ParseUint(part.Name(), 10, 64); parseErr != nil {
-			unmatched++
+		partDirs, readErr := os.ReadDir(sidecarDir)
+		if os.IsNotExist(readErr) {
 			continue
 		}
-		files, readErr := os.ReadDir(filepath.Join(sidecarDir, part.Name()))
 		if readErr != nil {
-			return stored, unmatched, sidecarIOError("read Apple Mail sidecar part", readErr)
+			return stored, unmatched, sidecarIOError("read Apple Mail sidecar directory", readErr)
 		}
-		for _, file := range files {
-			if !file.Type().IsRegular() {
+		if parsed == nil {
+			parsed, err = mime.Parse(raw)
+			if err != nil {
+				return stored, unmatched, errors.New("parse MIME for Apple Mail sidecars")
+			}
+		}
+
+		type candidate struct{ path, name string }
+		var candidates []candidate
+		nameCounts := make(map[string]int)
+		for _, part := range partDirs {
+			if !part.IsDir() {
 				unmatched++
 				continue
 			}
-			candidates = append(candidates, candidate{
-				path: filepath.Join(sidecarDir, part.Name(), file.Name()),
-				name: file.Name(),
-			})
-			nameCounts[file.Name()]++
-		}
-	}
-
-	for _, candidate := range candidates {
-		if ctx.Err() != nil {
-			return stored, unmatched, ctx.Err()
-		}
-		if nameCounts[candidate.name] != 1 {
-			unmatched++
-			continue
-		}
-		var match *mime.Attachment
-		matches := 0
-		for i := range parsed.Attachments {
-			att := &parsed.Attachments[i]
-			if att.Filename == candidate.name {
-				matches++
-				match = att
+			if _, parseErr := strconv.ParseUint(part.Name(), 10, 64); parseErr != nil {
+				unmatched++
+				continue
+			}
+			files, readErr := os.ReadDir(filepath.Join(sidecarDir, part.Name()))
+			if readErr != nil {
+				return stored, unmatched, sidecarIOError("read Apple Mail sidecar part", readErr)
+			}
+			for _, file := range files {
+				if !file.Type().IsRegular() {
+					unmatched++
+					continue
+				}
+				candidates = append(candidates, candidate{
+					path: filepath.Join(sidecarDir, part.Name(), file.Name()),
+					name: file.Name(),
+				})
+				nameCounts[file.Name()]++
 			}
 		}
-		if matches != 1 || len(match.Content) != 0 {
-			unmatched++
-			continue
+
+		for _, candidate := range candidates {
+			if ctx.Err() != nil {
+				return stored, unmatched, ctx.Err()
+			}
+			if nameCounts[candidate.name] != 1 {
+				unmatched++
+				continue
+			}
+			var match *mime.Attachment
+			matches := 0
+			for i := range parsed.Attachments {
+				att := &parsed.Attachments[i]
+				if att.Filename == candidate.name {
+					matches++
+					match = att
+				}
+			}
+			if matches != 1 || len(match.Content) != 0 {
+				unmatched++
+				continue
+			}
+			occurrence := match.PartKey
+			if occurrence == "" {
+				occurrence = "filename:" + candidate.name
+			}
+			info, statErr := os.Stat(candidate.path)
+			if statErr != nil {
+				return stored, unmatched, sidecarIOError("stat Apple Mail sidecar", statErr)
+			}
+			if info.Size() == 0 || info.Size() > maxBytes {
+				unmatched++
+				continue
+			}
+			file, openErr := os.Open(candidate.path)
+			if openErr != nil {
+				return stored, unmatched, sidecarIOError("open Apple Mail sidecar", openErr)
+			}
+			limit := maxBytes
+			if limit < math.MaxInt64 {
+				limit++
+			}
+			content, readErr := io.ReadAll(io.LimitReader(file, limit))
+			closeErr := file.Close()
+			if readErr != nil {
+				return stored, unmatched, sidecarIOError("read Apple Mail sidecar", readErr)
+			}
+			if closeErr != nil {
+				return stored, unmatched, sidecarIOError("close Apple Mail sidecar", closeErr)
+			}
+			if int64(len(content)) > maxBytes {
+				unmatched++
+				continue
+			}
+			att := *match
+			att.Content = content
+			hash := sha256.Sum256(content)
+			att.ContentHash = hex.EncodeToString(hash[:])
+			if prior, ok := resolved[occurrence]; ok {
+				prior.copies++
+				if prior.attachment.ContentHash != att.ContentHash {
+					prior.conflict = true
+				}
+				continue
+			}
+			resolved[occurrence] = &sidecarResolution{attachment: att, copies: 1}
+			order = append(order, occurrence)
 		}
-		info, statErr := os.Stat(candidate.path)
-		if statErr != nil {
-			return stored, unmatched, sidecarIOError("stat Apple Mail sidecar", statErr)
+	}
+	for _, key := range order {
+		if resolved[key].conflict {
+			unmatched += int64(resolved[key].copies)
+			return 0, unmatched, errors.New("conflicting Apple Mail sidecars for one MIME attachment")
 		}
-		if info.Size() > maxBytes {
-			unmatched++
-			continue
+	}
+	for _, key := range order {
+		att := &resolved[key].attachment
+		previousHash, lookupErr := existingSidecarHash(ctx, st, messageID, att)
+		if lookupErr != nil {
+			return stored, unmatched, fmt.Errorf("check Apple Mail sidecar occurrence: %w", lookupErr)
 		}
-		if info.Size() == 0 {
-			unmatched++
-			continue
-		}
-		content, readErr := os.ReadFile(candidate.path)
-		if readErr != nil {
-			return stored, unmatched, sidecarIOError("read Apple Mail sidecar", readErr)
-		}
-		att := *match
-		att.Content = content
-		hash := sha256.Sum256(content)
-		att.ContentHash = hex.EncodeToString(hash[:])
-		if storeErr := storeAttachment(st, attachmentsDir, messageID, &att); storeErr != nil {
+		if storeErr := storeAttachment(st, attachmentsDir, messageID, att); storeErr != nil {
 			return stored, unmatched, errors.New("store Apple Mail sidecar")
 		}
-		stored++
+		if previousHash != att.ContentHash {
+			stored++
+		}
 	}
 	if stored > 0 {
 		_, updateErr := st.DB().ExecContext(ctx, st.Rebind(`
@@ -130,6 +185,21 @@ func ingestEmlxSidecars(
 	return stored, unmatched, nil
 }
 
+func existingSidecarHash(ctx context.Context, st *store.Store, messageID int64, att *mime.Attachment) (string, error) {
+	var hash string
+	var row *sql.Row
+	if att.PartKey != "" {
+		row = st.DB().QueryRowContext(ctx, st.Rebind(`SELECT content_hash FROM attachments WHERE message_id = ? AND source_part_key = ? AND storage_path <> '' AND content_hash IS NOT NULL LIMIT 1`), messageID, att.PartKey)
+	} else {
+		row = st.DB().QueryRowContext(ctx, st.Rebind(`SELECT content_hash FROM attachments WHERE message_id = ? AND filename = ? AND mime_type = ? AND storage_path <> '' AND content_hash IS NOT NULL LIMIT 1`), messageID, att.Filename, att.ContentType)
+	}
+	err := row.Scan(&hash)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return hash, err
+}
+
 func emlxSidecarDir(emlxPath string) string {
 	if filepath.Base(filepath.Dir(emlxPath)) != "Messages" {
 		return ""
@@ -142,15 +212,6 @@ func emlxSidecarDir(emlxPath string) string {
 		return ""
 	}
 	return filepath.Join(filepath.Dir(filepath.Dir(emlxPath)), "Attachments", number)
-}
-
-func hasEmlxSidecars(emlxPath string) bool {
-	dir := emlxSidecarDir(emlxPath)
-	if dir == "" {
-		return false
-	}
-	info, err := os.Stat(dir)
-	return err == nil && info.IsDir()
 }
 
 func sidecarIOError(operation string, err error) error {

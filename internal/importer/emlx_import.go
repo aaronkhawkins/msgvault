@@ -235,14 +235,15 @@ func ImportEmlxDir(
 	hardErrors := false
 
 	type pendingEmlxMsg struct {
-		Raw       []byte
-		RawHash   string
-		SourceMsg string
-		LabelIDs  []int64
-		Fallback  time.Time
-		MboxIdx   int
-		MboxPath  string
-		FileName  string
+		Raw          []byte
+		RawHash      string
+		SourceMsg    string
+		LabelIDs     []int64
+		Fallback     time.Time
+		MboxIdx      int
+		MboxPath     string
+		FileName     string
+		SidecarFiles []string
 	}
 
 	const (
@@ -358,7 +359,7 @@ func ImportEmlxDir(
 
 			if exists {
 				stored, unmatched, sidecarErr := ingestEmlxSidecars(
-					ctx, st, messageID, p.FileName, p.Raw,
+					ctx, st, messageID, p.SidecarFiles, p.Raw,
 					opts.AttachmentsDir, opts.MaxMessageBytes,
 				)
 				summary.SidecarsStored += stored
@@ -406,7 +407,7 @@ func ImportEmlxDir(
 				hardErrors = true
 				continue
 			}
-			if opts.AttachmentsDir != "" && hasEmlxSidecars(p.FileName) {
+			if opts.AttachmentsDir != "" {
 				one, lookupErr := st.MessageExistsWithRawBatch(src.ID, []string{p.SourceMsg})
 				if lookupErr != nil {
 					cp.ErrorsCount++
@@ -416,7 +417,7 @@ func ImportEmlxDir(
 					log.Warn("failed to find ingested message for emlx sidecars", "error", lookupErr)
 				} else if messageID, ok := one[p.SourceMsg]; ok {
 					stored, unmatched, sidecarErr := ingestEmlxSidecars(
-						ctx, st, messageID, p.FileName, p.Raw,
+						ctx, st, messageID, p.SidecarFiles, p.Raw,
 						opts.AttachmentsDir, opts.MaxMessageBytes,
 					)
 					summary.SidecarsStored += stored
@@ -548,17 +549,19 @@ func ImportEmlxDir(
 					}
 				}
 				pending[idx].LabelIDs = existing
+				pending[idx].SidecarFiles = append(pending[idx].SidecarFiles, filePath)
 			} else {
 				pendingIdx[sourceMsgID] = len(pending)
 				pending = append(pending, pendingEmlxMsg{
-					Raw:       msg.Raw,
-					RawHash:   rawHash,
-					SourceMsg: sourceMsgID,
-					LabelIDs:  labelIDs,
-					Fallback:  fallbackDate,
-					MboxIdx:   mboxIdx,
-					MboxPath:  mb.Path,
-					FileName:  filePath,
+					Raw:          msg.Raw,
+					RawHash:      rawHash,
+					SourceMsg:    sourceMsgID,
+					LabelIDs:     labelIDs,
+					Fallback:     fallbackDate,
+					MboxIdx:      mboxIdx,
+					MboxPath:     mb.Path,
+					FileName:     filePath,
+					SidecarFiles: []string{filePath},
 				})
 				pendingBytes += int64(len(msg.Raw))
 			}
