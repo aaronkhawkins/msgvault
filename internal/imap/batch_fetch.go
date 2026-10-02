@@ -16,6 +16,7 @@ import (
 	gomessage "github.com/emersion/go-message"
 	gomail "github.com/emersion/go-message/mail"
 	gmailapi "go.kenn.io/msgvault/internal/gmail"
+	msgmime "go.kenn.io/msgvault/internal/mime"
 )
 
 var errIMAPRawBodyMissing = errors.New("IMAP fetch result did not include raw body")
@@ -83,7 +84,14 @@ func rawMIMEMessageID(rawMIME []byte) string {
 	header := gomail.Header{Header: entity.Header}
 	msgID, err := header.MessageID()
 	if err != nil {
-		return ""
+		// The MIME importer preserves structurally valid Message-ID headers
+		// that the strict mail parser rejects. Use the same acceptance rule
+		// here so membership observations can resolve to those stored rows.
+		rawID := strings.TrimSpace(entity.Header.Get("Message-ID"))
+		if msgmime.NormalizeMessageID(rawID) == "" {
+			return ""
+		}
+		return rawID
 	}
 	return msgID
 }

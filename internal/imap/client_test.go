@@ -319,7 +319,7 @@ func TestAddMessageIDsFromHeaderFetchResultsParsesMessageIDHeaders(t *testing.T)
 		{
 			UID: imapapi.UID(11),
 			BodySection: []imapclient.FetchBodySectionBuffer{
-				{Bytes: []byte("Message-ID: not a message id\r\n\r\n")},
+				{Bytes: []byte("Message-ID: <broken>suffix\r\n\r\n")},
 			},
 		},
 		{
