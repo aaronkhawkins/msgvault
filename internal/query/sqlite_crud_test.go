@@ -376,6 +376,50 @@ func TestDuplicateCASAliasRetainsHashAcrossAttachmentQueries(t *testing.T) {
 	assert.Equal(hash, byHash[1].ContentHash)
 }
 
+func TestGetAttachmentsByHashUsesIndexes(t *testing.T) {
+	env := newTestEnv(t)
+	hash := strings.Repeat("ab", 32)
+	path := attachmentCASPath(hash)
+	// Model an archive dominated by legacy hashless attachments, whose statistics
+	// can make a combined OR predicate choose a full table scan.
+	_, err := env.DB.Exec(`
+		WITH RECURSIVE numbers(n) AS (SELECT 1 UNION ALL SELECT n + 1 FROM numbers WHERE n < 2000)
+		INSERT INTO attachments (message_id, filename, content_hash, storage_path)
+		SELECT 1, 'fixture.bin', '', printf('fixture/%d', n) FROM numbers
+	`)
+	require.NoError(t, err)
+	_, err = env.DB.Exec(`INSERT INTO attachments (message_id, filename, content_hash, storage_path)
+		VALUES (1, 'alias.bin', NULL, ?), (1, 'owner.bin', ?, ?), (1, 'empty-alias.bin', '', ?)
+	`, path, hash, path, path)
+	require.NoError(t, err)
+	_, err = env.DB.Exec(`ANALYZE`)
+	require.NoError(t, err)
+	dialect := &rebindRecordingDialect{Dialect: env.Engine.dialect}
+	engine := NewEngineWithDialect(env.DB, dialect)
+	attachments, err := engine.GetAttachmentsByHash(env.Ctx, hash)
+	require.NoError(t, err)
+	require.Len(t, attachments, 3)
+	assert.Equal(t, []string{"alias.bin", "owner.bin", "empty-alias.bin"}, []string{attachments[0].Filename, attachments[1].Filename, attachments[2].Filename})
+	for _, attachment := range attachments {
+		assert.Equal(t, hash, attachment.ContentHash)
+	}
+	require.Len(t, dialect.queries, 1)
+	rows, err := env.DB.Query("EXPLAIN QUERY PLAN "+dialect.queries[0], hash, path)
+	require.NoError(t, err)
+	defer rows.Close()
+	var plan []string
+	for rows.Next() {
+		var id, parent, unused int
+		var detail string
+		require.NoError(t, rows.Scan(&id, &parent, &unused, &detail))
+		plan = append(plan, detail)
+		assert.NotContains(t, detail, "SCAN attachments", "attachment lookup must not scan the archive")
+	}
+	require.NoError(t, rows.Err())
+	assert.Contains(t, strings.Join(plan, "\n"), "idx_attachments_hash")
+	assert.Contains(t, strings.Join(plan, "\n"), "idx_attachments_storage_path")
+}
+
 func TestGetMessageBySourceID(t *testing.T) {
 	env := newTestEnv(t)
 

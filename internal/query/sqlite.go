@@ -1220,10 +1220,16 @@ func (e *SQLiteEngine) GetAttachment(ctx context.Context, id int64) (*Attachment
 // GetAttachmentsByHash retrieves all attachment metadata matching a content
 // hash in stable ID order.
 func (e *SQLiteEngine) GetAttachmentsByHash(ctx context.Context, contentHash string) ([]AttachmentInfo, error) {
+	// Separate indexed lookups avoid an OR-driven table scan when legacy rows
+	// with empty hashes dominate the archive. UNION preserves row uniqueness.
 	rows, err := e.queryContext(ctx, `
 		SELECT id, COALESCE(filename, ''), COALESCE(mime_type, ''), COALESCE(size, 0), COALESCE(content_hash, ''), COALESCE(storage_path, '')
 		FROM attachments
-		WHERE content_hash = ? OR (COALESCE(content_hash, '') = '' AND storage_path = ?)
+		WHERE content_hash = ?
+		UNION
+		SELECT id, COALESCE(filename, ''), COALESCE(mime_type, ''), COALESCE(size, 0), COALESCE(content_hash, ''), COALESCE(storage_path, '')
+		FROM attachments
+		WHERE COALESCE(content_hash, '') = '' AND storage_path = ?
 		ORDER BY id
 	`, contentHash, attachmentCASPath(contentHash))
 	if err != nil {
