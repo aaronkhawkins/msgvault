@@ -141,6 +141,7 @@ msgvault import-emlx me@gmail.com ~/Mail/INBOX.mbox/
 | `--checkpoint-interval` | `200` | Save progress every N messages |
 | `--no-attachments` | `false` | Skip writing attachments to disk (messages still record attachment metadata) |
 | `--bulk-sqlite` | `false` | Use SQLite WAL `synchronous=NORMAL` for this import process; PostgreSQL is unchanged |
+| `--defer-cache` | `false` | Finish after message ingestion without rebuilding derived analytics; use SQL analytics for live reads or run `build-cache` afterward |
 | `--no-default-identity` | `false` | Do not auto-confirm the identifier as this source's "me" identity |
 
 For a large import from retained `.emlx` files, `--bulk-sqlite` reduces the
@@ -149,6 +150,14 @@ loss can lose recently committed messages. Keep the source files available to
 resume or repeat the import, then run `msgvault backup create` and
 `msgvault backup verify` after it completes. Normal daemon writes and imports
 without this flag retain the default SQLite `synchronous=FULL` setting.
+
+For repeated bounded imports, `--defer-cache` avoids rebuilding the entire
+analytics cache after each batch. Message bodies, attachments, labels, full-text
+index updates, import errors, and resumability retain their normal behavior.
+Cached analytics remain stale until `msgvault build-cache` completes. Set
+`[analytics] engine = "sql"` when readers must see current database data during
+catch-up; setting `auto_build_cache = false` also disables the daemon’s automatic
+cache rebuilds. Without `--defer-cache`, imports rebuild analytics as before.
 
 ### How Apple Mail organizes files
 
