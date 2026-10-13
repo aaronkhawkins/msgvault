@@ -23,6 +23,7 @@ var (
 	importEmlxCheckpointInterval int
 	importEmlxNoAttachments      bool
 	importEmlxBulkSQLite         bool
+	importEmlxDeferCache         bool
 	importEmlxAccountsDB         string
 	importEmlxAccounts           []string
 	importEmlxIdentifier         string
@@ -176,6 +177,9 @@ in this import process. A host crash can lose recent commits; keep the original
 			importErr = importAutoAccounts(ctx, cmd, st, mailDir, attachmentsDir)
 		}
 
+		if importEmlxDeferCache {
+			return importErr
+		}
 		return errors.Join(importErr, rebuildCacheAfterWrite(dbPath))
 	},
 }
@@ -492,6 +496,10 @@ func init() {
 	importEmlxCmd.Flags().BoolVar(
 		&importEmlxBulkSQLite, "bulk-sqlite", false,
 		"Use SQLite WAL synchronous=NORMAL for a replayable bulk import (reduced crash durability)",
+	)
+	importEmlxCmd.Flags().BoolVar(
+		&importEmlxDeferCache, "defer-cache", false,
+		"Defer analytics-cache rebuild; use SQL analytics for live reads or run build-cache afterward",
 	)
 	importEmlxCmd.Flags().StringVar(
 		&importEmlxAccountsDB, "accounts-db", applemail.DefaultAccountsDBPath(),
