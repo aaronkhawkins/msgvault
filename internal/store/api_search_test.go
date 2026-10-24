@@ -1,7 +1,9 @@
 package store_test
 
 import (
+	"context"
 	"database/sql"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -236,4 +238,60 @@ func TestSearchMessagesQuery_ListIDFilters(t *testing.T) {
 			assert.ElementsMatch(t, tc.want, got, "matching message IDs")
 		})
 	}
+}
+
+func TestSearchMessagesQuery_BooleanOR(t *testing.T) {
+	f := storetest.New(t)
+
+	frontier := f.NewMessage().
+		WithSourceMessageID("or-frontier").
+		WithSubject("hello").
+		WithSnippet("preview").
+		Create(t, f.Store)
+	require.NoError(t, f.Store.UpsertMessageBody(frontier,
+		sql.NullString{String: "the frontier itinerary is ready", Valid: true},
+		sql.NullString{}))
+
+	flying := f.NewMessage().
+		WithSourceMessageID("or-flying").
+		WithSubject("flying tomorrow").
+		WithSnippet("status").
+		Create(t, f.Store)
+	require.NoError(t, f.Store.UpsertMessageBody(flying,
+		sql.NullString{String: "wheels up in the morning", Valid: true},
+		sql.NullString{}))
+
+	other := f.NewMessage().
+		WithSourceMessageID("or-other").
+		WithSubject("unrelated note").
+		WithSnippet("garden").
+		Create(t, f.Store)
+	require.NoError(t, f.Store.UpsertMessageBody(other,
+		sql.NullString{String: "water the garden", Valid: true},
+		sql.NullString{}))
+
+	_, err := f.Store.BackfillFTS(nil)
+	require.NoError(t, err)
+
+	orQuery := search.Parse("(frontier OR flying)")
+	require.NoError(t, orQuery.Err())
+	msgs, total, err := f.Store.SearchMessagesQuery(orQuery, 0, 50)
+	require.NoError(t, err)
+	assert.Equal(t, int64(2), total)
+	got := make([]int64, len(msgs))
+	for i, msg := range msgs {
+		got[i] = msg.ID
+	}
+	assert.ElementsMatch(t, []int64{frontier, flying}, got)
+
+	andQuery := search.Parse("frontier flying")
+	msgs, total, err = f.Store.SearchMessagesQuery(andQuery, 0, 50)
+	require.NoError(t, err)
+	assert.Equal(t, int64(0), total)
+	assert.Empty(t, msgs)
+
+	snippets, err := f.Store.MatchBodySnippets(context.Background(), []int64{frontier, flying, other}, orQuery.TextMatchClauses())
+	require.NoError(t, err)
+	assert.Contains(t, strings.ToLower(snippets[frontier]), "frontier")
+	assert.NotContains(t, snippets, other)
 }

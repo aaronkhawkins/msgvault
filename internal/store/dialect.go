@@ -409,6 +409,12 @@ type Dialect interface {
 	// to_tsquery and the FTS5 MATCH parser).
 	BuildFTSArg(terms []string) string
 
+	// BuildFTSArgClauses formats AND-of-OR text groups. A one-term
+	// group per word matches BuildFTSArg. Terms inside a group are
+	// alternatives, so a parenthesized OR query does not become an
+	// AND of every word plus the literal token OR.
+	BuildFTSArgClauses(clauses [][]string) string
+
 	// JSONBindExpr returns the SQL fragment to use in place of a bare ?
 	// when binding a Go string (or []byte) to a JSON column. SQLite has
 	// no JSON type and stores JSON as plain TEXT, so the placeholder

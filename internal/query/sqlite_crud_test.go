@@ -406,7 +406,7 @@ func TestGetAttachmentsByHashUsesIndexes(t *testing.T) {
 	require.Len(t, dialect.queries, 1)
 	rows, err := env.DB.Query("EXPLAIN QUERY PLAN "+dialect.queries[0], hash, path)
 	require.NoError(t, err)
-	defer rows.Close()
+	defer func() { _ = rows.Close() }()
 	var plan []string
 	for rows.Next() {
 		var id, parent, unused int

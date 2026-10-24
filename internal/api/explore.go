@@ -1581,8 +1581,8 @@ func (s *Server) resolveExploreVectorSearch(ctx context.Context, w http.Response
 		subjectTerms = append(subjectTerms, strings.ToLower(t))
 	}
 	hits, meta, err := hybridEngine.Search(ctx, hybrid.SearchRequest{
-		Mode: mode, FreeText: freeText, Filter: filter, Limit: exploreMaxLimit,
-		SubjectTerms: subjectTerms,
+		Mode: mode, FreeText: freeText, FTSClauses: parsed.TextMatchClauses(),
+		Filter: filter, Limit: exploreMaxLimit, SubjectTerms: subjectTerms,
 	})
 	if err != nil {
 		s.writeExploreVectorError(w, err)

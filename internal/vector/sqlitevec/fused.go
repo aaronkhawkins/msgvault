@@ -34,7 +34,7 @@ func (b *Backend) FusedSearch(ctx context.Context, req vector.FusedRequest) ([]v
 	if err := vector.ValidateFilter(req.Filter); err != nil {
 		return nil, false, err
 	}
-	if req.QueryVec == nil && len(req.FTSTerms) == 0 {
+	if req.QueryVec == nil && !req.HasFTS() {
 		return nil, false, errors.New("FusedSearch: neither vector nor FTS query provided")
 	}
 
@@ -337,11 +337,12 @@ SELECT message_id, rrf_score, bm25_score, vector_score,
 		queryVecArg = float32SliceBlob(req.QueryVec)
 	}
 	var ftsArg any
-	if len(req.FTSTerms) > 0 {
+	if req.HasFTS() {
 		// Render the dialect-neutral terms into the FTS5 MATCH arg
 		// (quoted, prefix-* terms). nil ftsArg → the CTE's
 		// `:fts_query IS NOT NULL` guard skips the BM25 leg.
-		_, arg := query.SQLiteQueryDialect{}.BuildFTSTerm(req.FTSTerms)
+		// FTSClauses keeps OR groups; otherwise each term is AND'd.
+		_, arg := query.SQLiteFTSMatchArg(req.FTSClauses, req.FTSTerms)
 		ftsArg = arg
 	}
 

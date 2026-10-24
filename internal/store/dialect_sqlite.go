@@ -358,16 +358,39 @@ func (d *SQLiteDialect) JSONIsDistinctExpr(col string) string { return col + " I
 // errors at the driver. Mirrors the empty-fallback shape in
 // PostgreSQLDialect.BuildFTSArg.
 func (d *SQLiteDialect) BuildFTSArg(terms []string) string {
-	quoted := make([]string, 0, len(terms))
-	for _, t := range terms {
-		if !hasFTSToken(t) {
-			continue
-		}
-		t = strings.ReplaceAll(t, `"`, `""`)
-		t = strings.ReplaceAll(t, "*", "")
-		quoted = append(quoted, `"`+t+`"*`)
+	clauses := make([][]string, len(terms))
+	for i, term := range terms {
+		clauses[i] = []string{term}
 	}
-	return strings.Join(quoted, " ")
+	return d.BuildFTSArgClauses(clauses)
+}
+
+// BuildFTSArgClauses formats AND-of-OR text groups as an FTS5 MATCH
+// argument. Terms inside a group are OR'd. Groups are space-joined,
+// which FTS5 treats as AND. A single-term query stays a flat prefix
+// expression, matching BuildFTSArg's historical output.
+func (d *SQLiteDialect) BuildFTSArgClauses(clauses [][]string) string {
+	groups := make([]string, 0, len(clauses))
+	for _, clause := range clauses {
+		parts := make([]string, 0, len(clause))
+		for _, term := range clause {
+			if !hasFTSToken(term) {
+				continue
+			}
+			term = strings.ReplaceAll(term, `"`, `""`)
+			term = strings.ReplaceAll(term, "*", "")
+			parts = append(parts, `"`+term+`"*`)
+		}
+		switch len(parts) {
+		case 0:
+			continue
+		case 1:
+			groups = append(groups, parts[0])
+		default:
+			groups = append(groups, "("+strings.Join(parts, " OR ")+")")
+		}
+	}
+	return strings.Join(groups, " ")
 }
 
 // hasFTSToken reports whether s contains at least one rune that the

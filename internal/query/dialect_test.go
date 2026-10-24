@@ -90,6 +90,28 @@ func TestSQLiteBuildFTSTerm(t *testing.T) {
 	}
 }
 
+func TestBuildFTSClausesORGroups(t *testing.T) {
+	sqliteExpr, sqliteArg := (SQLiteQueryDialect{}).BuildFTSClauses([][]string{
+		{"flight", "flying"},
+		{"confirmation"},
+	})
+	assert.Equal(t, "messages_fts MATCH ?", sqliteExpr)
+	assert.Equal(t, `("flight"* OR "flying"*) "confirmation"*`, sqliteArg)
+
+	pgExpr, pgArg := (PostgreSQLQueryDialect{}).BuildFTSClauses([][]string{
+		{"flight", "foo-bar"},
+		{"confirmation"},
+	})
+	assert.Equal(t, "m.search_fts @@ to_tsquery('simple', ?)", pgExpr)
+	assert.Equal(t, "(flight:* | (foo:* & bar:*)) & confirmation:*", pgArg)
+
+	bodyExpr, bodyArg := (PostgreSQLQueryDialect{}).BuildFTSBodyClauses([][]string{
+		{"flight", "flying"},
+	})
+	assert.Equal(t, "m.search_fts @@ to_tsquery('simple', ?)", bodyExpr)
+	assert.Equal(t, "(flight:*D | flying:*D)", bodyArg)
+}
+
 func TestBuildFTSBodyTermScopesExactBodyField(t *testing.T) {
 	t.Run("PostgreSQL weight D", func(t *testing.T) {
 		expr, arg := (PostgreSQLQueryDialect{}).BuildFTSBodyTerm([]string{"foo-bar", "baz"})

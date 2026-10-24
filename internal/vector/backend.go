@@ -438,12 +438,16 @@ type FusingBackend interface {
 type FusedRequest struct {
 	// FTSTerms are dialect-neutral, already-tokenized and
 	// punctuation-filtered search terms. An empty/nil slice skips the
-	// BM25 leg (vector-only). Each FusingBackend renders the terms via
-	// its own query dialect's BuildFTSTerm (SQLite FTS5 MATCH;
-	// PostgreSQL to_tsquery with :* prefix lexemes), so both backends
-	// prefix-match the SAME term set rather than diverging on a
+	// BM25 leg (vector-only) unless FTSClauses is set. Each FusingBackend
+	// renders the terms via its own query dialect's BuildFTSTerm (SQLite
+	// FTS5 MATCH; PostgreSQL to_tsquery with :* prefix lexemes), so both
+	// backends prefix-match the SAME term set rather than diverging on a
 	// pre-built dialect-specific expression.
-	FTSTerms     []string
+	FTSTerms []string
+	// FTSClauses is an AND-of-OR grouping. When non-empty, backends
+	// render it with BuildFTSClauses and do not AND FTSTerms together.
+	// A one-term group per word matches FTSTerms.
+	FTSClauses   [][]string
 	QueryVec     []float32 // query embedding; nil skips ANN
 	Generation   GenerationID
 	KPerSignal   int
@@ -452,6 +456,12 @@ type FusedRequest struct {
 	SubjectBoost float64
 	SubjectTerms []string // lowercased query terms used for subject-boost check
 	Filter       Filter
+}
+
+// HasFTS reports whether the request carries a keyword leg. FTSClauses
+// takes precedence over FTSTerms when both are set.
+func (r FusedRequest) HasFTS() bool {
+	return len(r.FTSClauses) > 0 || len(r.FTSTerms) > 0
 }
 
 // FusedHit is one result from a fused query. BM25Score/VectorScore are

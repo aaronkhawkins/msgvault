@@ -29,9 +29,12 @@ const (
 
 // SearchRequest is the caller-facing input to Engine.Search.
 type SearchRequest struct {
-	Mode         Mode
-	FreeText     string
-	FTSQuery     string // optional override; defaults to FreeText
+	Mode     Mode
+	FreeText string
+	FTSQuery string // optional override; defaults to FreeText
+	// FTSClauses is the parsed AND-of-OR shape. When set, it replaces
+	// whitespace tokenization of FreeText for the BM25 leg.
+	FTSClauses   [][]string
 	Filter       vector.Filter
 	Limit        int
 	SubjectTerms []string // lowercased terms for subject-boost check
@@ -226,11 +229,13 @@ func (e *Engine) Search(ctx context.Context, req SearchRequest) ([]vector.FusedH
 	// path needs this: --mode fts sanitizes via Store.SearchMessages and
 	// --mode vector has no BM25 branch at all.
 	terms := ftsTerms(req.FreeText)
-	if req.FTSQuery != "" {
+	clauses := filterFTSClauses(req.FTSClauses)
+	if req.FTSQuery != "" && len(clauses) == 0 {
 		terms = ftsTerms(req.FTSQuery)
 	}
 	fReq := vector.FusedRequest{
 		FTSTerms:     terms,
+		FTSClauses:   clauses,
 		QueryVec:     queryVec,
 		Generation:   active.ID,
 		KPerSignal:   e.cfg.KPerSignal,
@@ -298,6 +303,30 @@ func vectorHitsToFused(hits []vector.Hit) []vector.FusedHit {
 		}
 	}
 	return out
+}
+
+// filterFTSClauses drops punctuation-only terms and empty groups.
+// A nil result means the BM25 leg should be skipped.
+func filterFTSClauses(clauses [][]string) [][]string {
+	if len(clauses) == 0 {
+		return nil
+	}
+	keptClauses := make([][]string, 0, len(clauses))
+	for _, clause := range clauses {
+		kept := make([]string, 0, len(clause))
+		for _, term := range clause {
+			if hasFTSToken(term) {
+				kept = append(kept, term)
+			}
+		}
+		if len(kept) > 0 {
+			keptClauses = append(keptClauses, kept)
+		}
+	}
+	if len(keptClauses) == 0 {
+		return nil
+	}
+	return keptClauses
 }
 
 // ftsTerms turns a raw free-text query into the dialect-neutral term

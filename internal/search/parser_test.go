@@ -547,6 +547,67 @@ func TestQueryHasOperatorsPreservesExplicitEmptyConversationScope(t *testing.T) 
 	assert.False(t, q.IsEmpty())
 }
 
+func TestParseBooleanORAndParentheses(t *testing.T) {
+	q := Parse("message_type:imessage (frontier OR confirmation OR Oakland)")
+
+	require.NoError(t, q.Err())
+	assert.Equal(t, []string{"imessage"}, q.MessageTypes)
+	assert.Equal(t, []string{"frontier", "confirmation", "Oakland"}, q.TextTerms)
+	assert.Equal(t, [][]string{{"frontier", "confirmation", "Oakland"}}, q.TextClauses)
+	assert.NotContains(t, q.TextTerms, "OR")
+	assert.NotContains(t, q.TextTerms, "(frontier")
+
+	dated := Parse("(flight OR flying OR Oakland) after:2026-09-15")
+	require.NoError(t, dated.Err())
+	require.NotNil(t, dated.AfterDate)
+	assert.Equal(t, [][]string{{"flight", "flying", "Oakland"}}, dated.TextClauses)
+	assert.Equal(t, 2026, dated.AfterDate.Year())
+	assert.Equal(t, time.September, dated.AfterDate.Month())
+	assert.Equal(t, 15, dated.AfterDate.Day())
+
+	mixed := Parse("(flight OR flying) confirmation")
+	require.NoError(t, mixed.Err())
+	assert.Equal(t, [][]string{{"flight", "flying"}, {"confirmation"}}, mixed.TextClauses)
+
+	chained := Parse("(flight OR flying) OR confirmation")
+	require.NoError(t, chained.Err())
+	assert.Equal(t, [][]string{{"flight", "flying", "confirmation"}}, chained.TextClauses)
+
+	nested := Parse("flight OR (flying OR confirmation)")
+	require.NoError(t, nested.Err())
+	assert.Equal(t, [][]string{{"flight", "flying", "confirmation"}}, nested.TextClauses)
+
+	// A lowercase "or" is a word, not the boolean operator.
+	word := Parse("flight or confirmation")
+	require.NoError(t, word.Err())
+	assert.Equal(t, [][]string{{"flight"}, {"or"}, {"confirmation"}}, word.TextClauses)
+}
+
+func TestParseBooleanORRejectsIncompleteGroups(t *testing.T) {
+	for _, query := range []string{
+		"flight OR",
+		"OR flight",
+		"(flight OR confirmation",
+		"flight OR message_type:sms",
+		"message_type:sms OR flight",
+		"(flight confirmation) OR oakland",
+		"flight OR (confirmation itinerary)",
+	} {
+		t.Run(query, func(t *testing.T) {
+			require.Error(t, Parse(query).Err())
+		})
+	}
+}
+
+func TestTextMatchClausesDefaultsToAND(t *testing.T) {
+	q := &Query{TextTerms: []string{"flight", "confirmation"}}
+	assert.Equal(t, [][]string{{"flight"}, {"confirmation"}}, q.TextMatchClauses())
+
+	cleared := Parse("flight OR confirmation")
+	cleared.TextTerms = nil
+	assert.Nil(t, cleared.TextMatchClauses())
+}
+
 func TestParseConversationIDRejectsNonPositiveAndInvalidValues(t *testing.T) {
 	for _, value := range []string{"0", "-1", "abc", ""} {
 		t.Run(value, func(t *testing.T) {
