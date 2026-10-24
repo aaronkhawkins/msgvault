@@ -15,6 +15,12 @@ import (
 // checks which treat nil and empty identically.
 func assertQueryEqual(t *testing.T, got, want Query) {
 	t.Helper()
+	if len(want.TextClauses) == 0 && len(want.TextTerms) > 0 {
+		want.TextClauses = make([][]string, len(want.TextTerms))
+		for i, term := range want.TextTerms {
+			want.TextClauses[i] = []string{term}
+		}
+	}
 	diff := cmp.Diff(want, got, cmpopts.EquateEmpty(), cmpopts.IgnoreUnexported(Query{}))
 	assert.Empty(t, diff, "Query mismatch (-want +got):\n%s", diff)
 }

@@ -349,7 +349,7 @@ func (b *Backend) FusedSearch(ctx context.Context, req vector.FusedRequest) ([]v
 	if req.QueryVec == nil {
 		return b.Backend.FusedSearch(ctx, req)
 	}
-	if len(req.FTSTerms) == 0 {
+	if !req.HasFTS() {
 		vec, err := b.Search(ctx, req.Generation, req.QueryVec, req.KPerSignal+1, req.Filter)
 		if err != nil {
 			return nil, false, err
@@ -412,7 +412,7 @@ func (b *Backend) FusedSearch(ctx context.Context, req vector.FusedRequest) ([]v
 // live-message filters. This avoids running the original full fused CTE merely
 // to obtain the keyword leg of a Qdrant-backed hybrid search.
 func (b *Backend) ftsHits(ctx context.Context, req vector.FusedRequest) ([]vector.Hit, bool, error) {
-	_, term := query.SQLiteQueryDialect{}.BuildFTSTerm(req.FTSTerms)
+	_, term := query.SQLiteFTSMatchArg(req.FTSClauses, req.FTSTerms)
 	limit := min(max((req.KPerSignal+1)*4, 128), vector.MaxFilterMessageIDs)
 	for {
 		candidates, err := b.fetchFTSCandidates(ctx, term, limit)

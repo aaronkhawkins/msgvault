@@ -12,7 +12,13 @@ import (
 
 // Query represents a parsed search query with all supported filters.
 type Query struct {
-	TextTerms       []string   // Full-text search terms
+	TextTerms []string // Full-text search terms, in order, with boolean operators removed
+	// TextClauses is the boolean shape of TextTerms. Outer groups are AND;
+	// terms inside a group are OR. A query with no OR is one single-term
+	// group per word, which preserves the historical AND behavior. Nil
+	// means the caller only set TextTerms; TextMatchClauses treats that
+	// as AND. The parser always sets both.
+	TextClauses     [][]string
 	FromAddrs       []string   // from: filters
 	ToAddrs         []string   // to: filters
 	CcAddrs         []string   // cc: filters
@@ -126,6 +132,7 @@ type UnsupportedOperator struct {
 // IsEmpty returns true if the query has no search criteria.
 func (q *Query) IsEmpty() bool {
 	return len(q.TextTerms) == 0 &&
+		len(q.TextClauses) == 0 &&
 		len(q.FromAddrs) == 0 &&
 		len(q.ToAddrs) == 0 &&
 		len(q.CcAddrs) == 0 &&
@@ -386,37 +393,194 @@ func NewParser() *Parser {
 //   - larger:, smaller: - size filters (e.g., 5M, 100K)
 //   - message_type: or message_type= - message type filter (e.g., sms)
 //   - Bare words and "quoted phrases" - full-text search
+//   - Uppercase OR and parentheses group free-text alternatives.
+//     Filters such as message_type: and after: always AND with that text.
+//     A lowercase "or" stays a word.
 func (p *Parser) Parse(queryStr string) *Query {
 	q := &Query{}
 	now := time.Now().UTC()
 	if p.Now != nil {
 		now = p.Now()
 	}
-	tokens := tokenize(queryStr)
-
-	for _, token := range tokens {
-		if isQuotedPhrase(token) {
-			q.TextTerms = append(q.TextTerms, unquote(token))
-			continue
-		}
-
-		if op, value, ok := splitOperatorToken(token); ok {
-			value = unquote(value)
-
-			if handler, ok := operators[op]; ok {
-				if err := handler(q, value, now); err != nil {
-					q.parseErrs = append(q.parseErrs, err)
-				}
-			} else {
-				q.TextTerms = append(q.TextTerms, token)
-			}
-			continue
-		}
-
-		q.TextTerms = append(q.TextTerms, token)
+	clauses, err := parseTextClauses(q, tokenize(queryStr), now)
+	if err != nil {
+		q.parseErrs = append(q.parseErrs, err)
 	}
-
+	q.TextClauses = clauses
+	for _, clause := range clauses {
+		q.TextTerms = append(q.TextTerms, clause...)
+	}
 	return q
+}
+
+// TextMatchClauses returns the AND-of-OR groups used to build an FTS query.
+// Callers that only fill TextTerms keep the historical AND of each term.
+// Clearing TextTerms disables free-text matching even if a shallow copy
+// still carries TextClauses.
+func (q *Query) TextMatchClauses() [][]string {
+	if q == nil || len(q.TextTerms) == 0 {
+		return nil
+	}
+	if len(q.TextClauses) > 0 {
+		return q.TextClauses
+	}
+	clauses := make([][]string, len(q.TextTerms))
+	for i, term := range q.TextTerms {
+		clauses[i] = []string{term}
+	}
+	return clauses
+}
+
+// parseTextClauses splits free text into AND-of-OR groups and applies
+// structured operators as they appear. Parentheses group OR alternatives.
+// Juxtaposition is AND, so "(a OR b) c" is (a OR b) AND c. A parenthesized
+// AND cannot be an OR operand: "(a b) OR c" is rejected instead of being
+// rewritten as a different boolean.
+func parseTextClauses(q *Query, tokens []string, now time.Time) ([][]string, error) {
+	p := &textParser{q: q, tokens: tokens, now: now}
+	clauses, err := p.parseAnd()
+	if err != nil {
+		return clauses, err
+	}
+	if p.i < len(p.tokens) {
+		return clauses, errors.New("unbalanced parenthesis")
+	}
+	return clauses, nil
+}
+
+type textPrimary struct {
+	words      []string
+	clauses    [][]string
+	groupedAnd bool
+}
+
+type textParser struct {
+	q      *Query
+	tokens []string
+	i      int
+	now    time.Time
+}
+
+func (p *textParser) peek() string {
+	if p.i >= len(p.tokens) {
+		return ""
+	}
+	return p.tokens[p.i]
+}
+
+func (p *textParser) knownOperator(token string) bool {
+	op, _, ok := splitOperatorToken(token)
+	if !ok {
+		return false
+	}
+	_, known := operators[op]
+	return known
+}
+
+func (p *textParser) applyOperator() {
+	token := p.tokens[p.i]
+	p.i++
+	op, value, _ := splitOperatorToken(token)
+	handler := operators[op]
+	if err := handler(p.q, unquote(value), p.now); err != nil {
+		p.q.parseErrs = append(p.q.parseErrs, err)
+	}
+}
+
+func (p *textParser) parseAnd() ([][]string, error) {
+	var clauses [][]string
+	for p.i < len(p.tokens) {
+		token := p.tokens[p.i]
+		if token == ")" {
+			break
+		}
+		if p.knownOperator(token) {
+			p.applyOperator()
+			continue
+		}
+		item, err := p.parseOr()
+		if err != nil {
+			return clauses, err
+		}
+		if item.groupedAnd {
+			clauses = append(clauses, item.clauses...)
+			continue
+		}
+		if len(item.words) > 0 {
+			clauses = append(clauses, item.words)
+		}
+	}
+	return clauses, nil
+}
+
+func (p *textParser) parseOr() (textPrimary, error) {
+	first, err := p.parsePrimary()
+	if err != nil {
+		return textPrimary{}, err
+	}
+	if p.peek() != "OR" {
+		return first, nil
+	}
+	if first.groupedAnd {
+		return textPrimary{}, errors.New("OR cannot combine a parenthesized AND group")
+	}
+	words := append([]string(nil), first.words...)
+	for p.peek() == "OR" {
+		p.i++
+		next := p.peek()
+		if next == "" || next == ")" {
+			return textPrimary{}, errors.New("OR is missing a search term")
+		}
+		if p.knownOperator(next) {
+			return textPrimary{}, errors.New("OR cannot connect search filters; use it between words")
+		}
+		item, err := p.parsePrimary()
+		if err != nil {
+			return textPrimary{}, err
+		}
+		if item.groupedAnd {
+			return textPrimary{}, errors.New("OR cannot combine a parenthesized AND group")
+		}
+		if len(item.words) == 0 {
+			return textPrimary{}, errors.New("OR is missing a search term")
+		}
+		words = append(words, item.words...)
+	}
+	return textPrimary{words: words}, nil
+}
+
+func (p *textParser) parsePrimary() (textPrimary, error) {
+	token := p.peek()
+	switch {
+	case token == "" || token == "OR" || token == ")":
+		return textPrimary{}, errors.New("OR is missing a search term")
+	case token == "(":
+		p.i++
+		clauses, err := p.parseAnd()
+		if err != nil {
+			return textPrimary{}, err
+		}
+		if p.peek() != ")" {
+			return textPrimary{}, errors.New("unbalanced parenthesis")
+		}
+		p.i++
+		switch len(clauses) {
+		case 0:
+			return textPrimary{}, nil
+		case 1:
+			return textPrimary{words: clauses[0]}, nil
+		default:
+			return textPrimary{groupedAnd: true, clauses: clauses}, nil
+		}
+	case isQuotedPhrase(token):
+		p.i++
+		return textPrimary{words: []string{unquote(token)}}, nil
+	case p.knownOperator(token):
+		return textPrimary{}, errors.New("OR cannot connect search filters; use it between words")
+	default:
+		p.i++
+		return textPrimary{words: []string{token}}, nil
+	}
 }
 
 // Parse is a convenience function that parses using default settings.
@@ -533,6 +697,16 @@ func tokenize(queryStr string) []string {
 				tokens = append(tokens, current.String())
 				current.Reset()
 			}
+			afterColon = false
+		} else if !inQuotes && !afterColon && (char == '(' || char == ')') {
+			// Split grouping parentheses from the words they touch.
+			// A parenthesis immediately after ':' stays inside the
+			// operator token so list:(value) keeps its existing error.
+			if current.Len() > 0 {
+				tokens = append(tokens, current.String())
+				current.Reset()
+			}
+			tokens = append(tokens, string(char))
 			afterColon = false
 		} else {
 			current.WriteRune(char)

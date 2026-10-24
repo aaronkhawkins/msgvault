@@ -85,10 +85,18 @@ type Dialect interface {
 	// tsquery support prefix matching via dialect-appropriate syntax.
 	BuildFTSTerm(terms []string) (expr string, arg string)
 
+	// BuildFTSClauses converts AND-of-OR text groups into one FTS
+	// expression. A single-term group per word matches BuildFTSTerm.
+	// Terms inside a group are OR'd; groups are AND'd.
+	BuildFTSClauses(clauses [][]string) (expr string, arg string)
+
 	// BuildFTSBodyTerm is the exact-body counterpart to BuildFTSTerm.
 	// SQLite scopes the FTS5 query to its body column; PostgreSQL restricts
 	// tsquery lexemes to weight D in the versioned search_fts layout.
 	BuildFTSBodyTerm(terms []string) (expr string, arg string)
+
+	// BuildFTSBodyClauses is the exact-body counterpart to BuildFTSClauses.
+	BuildFTSBodyClauses(clauses [][]string) (expr string, arg string)
 
 	// FTSBodySearchReadinessSQL returns a query that yields true when the
 	// backend's body-search layout is ready, or "" when no version probe is
@@ -181,18 +189,42 @@ func (SQLiteQueryDialect) FTSJoin() string {
 
 // BuildFTSTerm for SQLite FTS5: quote each term and add "*" for prefix match,
 // AND them together. Escaping double-quotes prevents injection of FTS5 operators.
-func (SQLiteQueryDialect) BuildFTSTerm(terms []string) (expr string, arg string) {
-	ftsTerms := make([]string, len(terms))
-	for i, term := range terms {
-		term = strings.ReplaceAll(term, "\"", "\"\"")
-		term = strings.ReplaceAll(term, "*", "")
-		ftsTerms[i] = fmt.Sprintf("\"%s\"*", term)
+func (d SQLiteQueryDialect) BuildFTSTerm(terms []string) (expr string, arg string) {
+	return d.BuildFTSClauses(oneTermClauses(terms))
+}
+
+// BuildFTSClauses formats AND-of-OR groups as an FTS5 MATCH argument.
+// Each term is quote-escaped and prefix-matched. One term stays a bare
+// prefix; several terms in a group become "(a OR b)". Groups are
+// space-joined, which FTS5 treats as AND. Tokenless terms are kept, so
+// a one-term group per word matches BuildFTSTerm.
+func (SQLiteQueryDialect) BuildFTSClauses(clauses [][]string) (expr string, arg string) {
+	groups := make([]string, 0, len(clauses))
+	for _, clause := range clauses {
+		parts := make([]string, 0, len(clause))
+		for _, term := range clause {
+			term = strings.ReplaceAll(term, "\"", "\"\"")
+			term = strings.ReplaceAll(term, "*", "")
+			parts = append(parts, fmt.Sprintf("\"%s\"*", term))
+		}
+		switch len(parts) {
+		case 0:
+			continue
+		case 1:
+			groups = append(groups, parts[0])
+		default:
+			groups = append(groups, "("+strings.Join(parts, " OR ")+")")
+		}
 	}
-	return "messages_fts MATCH ?", strings.Join(ftsTerms, " ")
+	return "messages_fts MATCH ?", strings.Join(groups, " ")
 }
 
 func (d SQLiteQueryDialect) BuildFTSBodyTerm(terms []string) (expr string, arg string) {
-	expr, arg = d.BuildFTSTerm(terms)
+	return d.BuildFTSBodyClauses(oneTermClauses(terms))
+}
+
+func (d SQLiteQueryDialect) BuildFTSBodyClauses(clauses [][]string) (expr string, arg string) {
+	expr, arg = d.BuildFTSClauses(clauses)
 	if arg == "" {
 		return expr, arg
 	}
@@ -298,44 +330,129 @@ func (PostgreSQLQueryDialect) FTSJoin() string { return "" }
 // with store.PostgreSQLDialect) so punctuation like `-`, `.`, `@`
 // becomes a lexeme boundary rather than ending up in an invalid
 // tsquery, append :* for prefix match, AND lexemes with " & ".
-func (PostgreSQLQueryDialect) BuildFTSTerm(terms []string) (expr string, arg string) {
-	tsTerms := make([]string, 0, len(terms))
-	for _, term := range terms {
-		for _, lex := range sqldialect.EscapeTSQueryTerm(term) {
-			tsTerms = append(tsTerms, lex+":*")
-		}
-	}
-	if len(tsTerms) == 0 {
-		return "FALSE", ""
-	}
-	return "m.search_fts @@ to_tsquery('simple', ?)", strings.Join(tsTerms, " & ")
+func (d PostgreSQLQueryDialect) BuildFTSTerm(terms []string) (expr string, arg string) {
+	return d.BuildFTSClauses(oneTermClauses(terms))
 }
 
-func (PostgreSQLQueryDialect) BuildFTSBodyTerm(terms []string) (expr string, arg string) {
-	termGroups := make([]string, 0, len(terms))
-	for _, term := range terms {
-		lexemes := sqldialect.EscapeTSQueryTerm(term)
-		parts := make([]string, len(lexemes))
-		for i, lexeme := range lexemes {
-			suffix := ":D"
-			if i == len(lexemes)-1 {
-				suffix = ":*D"
+// BuildFTSClauses formats AND-of-OR groups as a to_tsquery argument.
+// Lexemes inside one alternative are AND'd. Alternatives are OR'd.
+// A single alternative is not wrapped, so one group per word matches
+// BuildFTSTerm, including punctuation splitting.
+func (PostgreSQLQueryDialect) BuildFTSClauses(clauses [][]string) (expr string, arg string) {
+	groups := make([]string, 0, len(clauses))
+	for _, clause := range clauses {
+		alternatives := make([]string, 0, len(clause))
+		for _, term := range clause {
+			parts := prefixLexemes(sqldialect.EscapeTSQueryTerm(term))
+			switch len(parts) {
+			case 0:
+				continue
+			case 1:
+				alternatives = append(alternatives, parts[0])
+			default:
+				alternatives = append(alternatives, "("+strings.Join(parts, " & ")+")")
 			}
-			parts[i] = lexeme + suffix
 		}
-		switch len(parts) {
+		switch len(alternatives) {
 		case 0:
 			continue
 		case 1:
-			termGroups = append(termGroups, parts[0])
+			groups = append(groups, unwrapSingleAlternative(alternatives[0]))
 		default:
-			termGroups = append(termGroups, "("+strings.Join(parts, " <-> ")+")")
+			groups = append(groups, "("+strings.Join(alternatives, " | ")+")")
 		}
 	}
-	if len(termGroups) == 0 {
+	if len(groups) == 0 {
 		return "FALSE", ""
 	}
-	return "m.search_fts @@ to_tsquery('simple', ?)", strings.Join(termGroups, " & ")
+	return "m.search_fts @@ to_tsquery('simple', ?)", strings.Join(groups, " & ")
+}
+
+func prefixLexemes(lexemes []string) []string {
+	parts := make([]string, len(lexemes))
+	for i, lexeme := range lexemes {
+		parts[i] = lexeme + ":*"
+	}
+	return parts
+}
+
+// unwrapSingleAlternative removes parentheses that only exist to group
+// one alternative's lexemes. "foo-bar" must stay "foo:* & bar:*".
+func unwrapSingleAlternative(alternative string) string {
+	if len(alternative) >= 2 && alternative[0] == '(' && alternative[len(alternative)-1] == ')' {
+		return alternative[1 : len(alternative)-1]
+	}
+	return alternative
+}
+
+func (d PostgreSQLQueryDialect) BuildFTSBodyTerm(terms []string) (expr string, arg string) {
+	return d.BuildFTSBodyClauses(oneTermClauses(terms))
+}
+
+func (PostgreSQLQueryDialect) BuildFTSBodyClauses(clauses [][]string) (expr string, arg string) {
+	groups := make([]string, 0, len(clauses))
+	for _, clause := range clauses {
+		alternatives := make([]string, 0, len(clause))
+		for _, term := range clause {
+			lexemes := sqldialect.EscapeTSQueryTerm(term)
+			parts := make([]string, 0, len(lexemes))
+			for i, lexeme := range lexemes {
+				suffix := ":D"
+				if i == len(lexemes)-1 {
+					suffix = ":*D"
+				}
+				parts = append(parts, lexeme+suffix)
+			}
+			switch len(parts) {
+			case 0:
+				continue
+			case 1:
+				alternatives = append(alternatives, parts[0])
+			default:
+				alternatives = append(alternatives, "("+strings.Join(parts, " <-> ")+")")
+			}
+		}
+		switch len(alternatives) {
+		case 0:
+			continue
+		case 1:
+			groups = append(groups, alternatives[0])
+		default:
+			groups = append(groups, "("+strings.Join(alternatives, " | ")+")")
+		}
+	}
+	if len(groups) == 0 {
+		return "FALSE", ""
+	}
+	return "m.search_fts @@ to_tsquery('simple', ?)", strings.Join(groups, " & ")
+}
+
+// SQLiteFTSMatchArg renders a fused keyword leg. Non-empty clauses keep
+// OR groups; otherwise each term is AND'd.
+func SQLiteFTSMatchArg(clauses [][]string, terms []string) (expr string, arg string) {
+	d := SQLiteQueryDialect{}
+	if len(clauses) > 0 {
+		return d.BuildFTSClauses(clauses)
+	}
+	return d.BuildFTSTerm(terms)
+}
+
+// PostgreSQLFTSMatchArg renders a fused keyword leg. Non-empty clauses
+// keep OR groups; otherwise each term is AND'd.
+func PostgreSQLFTSMatchArg(clauses [][]string, terms []string) (expr string, arg string) {
+	d := PostgreSQLQueryDialect{}
+	if len(clauses) > 0 {
+		return d.BuildFTSClauses(clauses)
+	}
+	return d.BuildFTSTerm(terms)
+}
+
+func oneTermClauses(terms []string) [][]string {
+	clauses := make([][]string, len(terms))
+	for i, term := range terms {
+		clauses[i] = []string{term}
+	}
+	return clauses
 }
 
 func (PostgreSQLQueryDialect) FTSBodySearchReadinessSQL() string {

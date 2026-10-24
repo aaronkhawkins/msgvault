@@ -495,11 +495,12 @@ func (s *Store) searchMessagesQueryImpl(
 	// FTS text terms. ftsEnabled is the authoritative signal that FTS is
 	// active — ftsJoin may be empty on dialects (e.g. PostgreSQL) whose
 	// tsvector lives on the main table and needs no extra join.
-	ftsEnabled := len(q.TextTerms) > 0 && ftsAvailable
+	textClauses := q.TextMatchClauses()
+	ftsEnabled := len(textClauses) > 0 && ftsAvailable
 	var ftsJoin, ftsOrder, ftsExpr string
 	var ftsOrderArgCount int
 	if ftsEnabled {
-		ftsExpr = s.dialect.BuildFTSArg(q.TextTerms)
+		ftsExpr = s.dialect.BuildFTSArgClauses(textClauses)
 		if ftsExpr == "" {
 			// Every text term reduced to nothing usable (punctuation-
 			// only input like "!!!" or "---"). Dispatching the dialect's
@@ -519,25 +520,35 @@ func (s *Store) searchMessagesQueryImpl(
 			conditions = append(conditions, where)
 			args = append(args, ftsExpr)
 		}
-	} else if len(q.TextTerms) > 0 {
+	} else if len(textClauses) > 0 {
 		// FTS unavailable but the caller still has free-text terms.
 		// Match each term against subject OR snippet so the no-FTS
 		// path catches snippet hits, not just subjects. Per CLAUDE.md,
-		// search queries never scan message_bodies.
+		// search queries never scan message_bodies. Terms inside one
+		// boolean group are OR'd; groups are AND'd.
 		added := 0
-		for _, term := range q.TextTerms {
-			// Skip terms with no searchable token (empty string,
-			// punctuation-only). hasFTSToken is the same predicate the
-			// FTS path uses via BuildFTSArg, so both paths agree on what
-			// is "tokenless". Without this, term=="" becomes LIKE '%%'
-			// and matches every message instead of nothing.
-			if !hasFTSToken(term) {
+		for _, clause := range textClauses {
+			alternatives := make([]string, 0, len(clause))
+			var clauseArgs []any
+			for _, term := range clause {
+				// Skip terms with no searchable token (empty string,
+				// punctuation-only). hasFTSToken is the same predicate the
+				// FTS path uses via BuildFTSArg, so both paths agree on what
+				// is "tokenless". Without this, term=="" becomes LIKE '%%'
+				// and matches every message instead of nothing.
+				if !hasFTSToken(term) {
+					continue
+				}
+				like := "%" + escapeLike(strings.ToLower(term)) + "%"
+				alternatives = append(alternatives,
+					`(LOWER(m.subject) LIKE ? ESCAPE '\' OR LOWER(m.snippet) LIKE ? ESCAPE '\')`)
+				clauseArgs = append(clauseArgs, like, like)
+			}
+			if len(alternatives) == 0 {
 				continue
 			}
-			like := "%" + escapeLike(strings.ToLower(term)) + "%"
-			conditions = append(conditions,
-				`(LOWER(m.subject) LIKE ? ESCAPE '\' OR LOWER(m.snippet) LIKE ? ESCAPE '\')`)
-			args = append(args, like, like)
+			conditions = append(conditions, "("+strings.Join(alternatives, " OR ")+")")
+			args = append(args, clauseArgs...)
 			added++
 		}
 		if added == 0 {

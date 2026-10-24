@@ -334,11 +334,12 @@ func attachmentInfoFromStore(att store.APIAttachment) AttachmentInfo {
 
 // SearchResult represents search results.
 type SearchResult struct {
-	Query    string           `json:"query"`
-	Total    int64            `json:"total"`
-	Page     int              `json:"page"`
-	PageSize int              `json:"page_size"`
-	Messages []MessageSummary `json:"messages"`
+	Query        string              `json:"query"`
+	Total        int64               `json:"total"`
+	Page         int                 `json:"page"`
+	PageSize     int                 `json:"page_size"`
+	Messages     []MessageSummary    `json:"messages"`
+	BodyContexts []BodySearchContext `json:"body_contexts,omitempty"`
 }
 
 // hybridSearchResponse represents results from vector or hybrid search.
@@ -421,6 +422,12 @@ func writeJSON(w http.ResponseWriter, status int, data any) {
 func writeError(w http.ResponseWriter, status int, err string, message string) {
 	writeJSON(w, status, ErrorResponse{Error: err, Message: message})
 }
+
+// interactiveSearchBudget bounds a user-facing search so a slow keyword
+// scan or embedding call returns query_timeout or embedding_timeout
+// before a client gives up with an empty timeout. Index builds keep
+// their own longer embedding timeout.
+const interactiveSearchBudget = 10 * time.Second
 
 // writeIfContextError converts a context deadline/cancellation into a
 // structured 503 response and returns true. A request that overran its
@@ -917,6 +924,14 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	offset := (page - 1) * pageSize
+	includeMatches, _, err := queryBool(r, "include_matches")
+	if err != nil {
+		s.rejectBadParam(w, err)
+		return
+	}
+
+	searchCtx, cancel := context.WithTimeout(r.Context(), interactiveSearchBudget)
+	defer cancel()
 
 	var (
 		messages []store.APIMessage
@@ -926,9 +941,9 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 		parsedQuery.ResultSort == search.ResultSortNewest
 	if searcher, ok := s.store.(ctxMessageSearcher); ok {
 		if useQuery {
-			messages, total, err = searcher.SearchMessagesQueryContext(r.Context(), parsedQuery, offset, pageSize)
+			messages, total, err = searcher.SearchMessagesQueryContext(searchCtx, parsedQuery, offset, pageSize)
 		} else {
-			messages, total, err = searcher.SearchMessagesContext(r.Context(), searchText, offset, pageSize)
+			messages, total, err = searcher.SearchMessagesContext(searchCtx, searchText, offset, pageSize)
 		}
 	} else if useQuery {
 		messages, total, err = s.store.SearchMessagesQuery(parsedQuery, offset, pageSize)
@@ -950,12 +965,55 @@ func (s *Server) handleSearch(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeJSON(w, http.StatusOK, SearchResult{
-		Query:    searchText,
-		Total:    total,
-		Page:     page,
-		PageSize: pageSize,
-		Messages: summaries,
+		Query:        searchText,
+		Total:        total,
+		Page:         page,
+		PageSize:     pageSize,
+		Messages:     summaries,
+		BodyContexts: s.matchBodyContexts(searchCtx, messages, parsedQuery, includeMatches),
 	})
+}
+
+// bodySnippetSearcher is optional. Search still succeeds when a store
+// cannot excerpt the page, or when the excerpt query fails.
+type bodySnippetSearcher interface {
+	MatchBodySnippets(ctx context.Context, ids []int64, clauses [][]string) (map[int64]string, error)
+}
+
+func (s *Server) matchBodyContexts(
+	ctx context.Context, messages []store.APIMessage, parsed *search.Query, includeMatches bool,
+) []BodySearchContext {
+	if !includeMatches || len(messages) == 0 {
+		return nil
+	}
+	snippets, ok := s.store.(bodySnippetSearcher)
+	if !ok {
+		return nil
+	}
+	ids := make([]int64, len(messages))
+	for i, message := range messages {
+		ids[i] = message.ID
+	}
+	found, err := snippets.MatchBodySnippets(ctx, ids, parsed.TextMatchClauses())
+	if err != nil {
+		s.logger.Warn("match body snippets failed", "error", err)
+		return nil
+	}
+	contexts := make([]BodySearchContext, 0, len(found))
+	for _, id := range ids {
+		text := strings.TrimSpace(found[id])
+		if text == "" {
+			continue
+		}
+		contexts = append(contexts, BodySearchContext{
+			MessageID:       id,
+			ContextSnippets: []string{text},
+		})
+	}
+	if len(contexts) == 0 {
+		return nil
+	}
+	return contexts
 }
 
 func parseSearchQueryRequest(r *http.Request, query string) *search.Query {
@@ -1011,13 +1069,15 @@ func (s *Server) handleHybridSearch(
 		s.writeVectorUnavailable(w)
 		return
 	}
-	ctx := r.Context()
+	ctx, cancel := context.WithTimeout(r.Context(), interactiveSearchBudget)
+	defer cancel()
 	if !s.vectorSearchPreflight(ctx, w) {
 		return
 	}
 	start := time.Now()
 
 	freeText := strings.Join(parsed.TextTerms, " ")
+	ftsClauses := parsed.TextMatchClauses()
 	// Vector/hybrid search requires text to embed; filter-only
 	// queries have no query vector to rank by. Callers that want
 	// pure structured filtering should use mode=fts instead of
@@ -1036,6 +1096,9 @@ func (s *Server) handleHybridSearch(
 
 	filter, err := hybridEngine.BuildFilter(ctx, parsed, structuredFilter)
 	if err != nil {
+		if s.writeIfContextError(w, err) {
+			return
+		}
 		s.logger.Error("build hybrid filter failed", "query", q, "error", err)
 		writeError(w, http.StatusInternalServerError, "internal_error", "filter resolution failed")
 		return
@@ -1048,6 +1111,7 @@ func (s *Server) handleHybridSearch(
 	req := hybrid.SearchRequest{
 		Mode:         hybrid.Mode(mode),
 		FreeText:     freeText,
+		FTSClauses:   ftsClauses,
 		Filter:       filter,
 		Limit:        fetchLimit,
 		SubjectTerms: subjectTerms,
@@ -1069,6 +1133,10 @@ func (s *Server) handleHybridSearch(
 		case errors.Is(err, vector.ErrEmbeddingTimeout):
 			writeError(w, http.StatusServiceUnavailable, "embedding_timeout",
 				"the embedding endpoint did not respond in time; retry, or raise [vector.embeddings].timeout")
+		case errors.Is(err, context.DeadlineExceeded), errors.Is(err, context.Canceled):
+			if s.writeIfContextError(w, err) {
+				return
+			}
 		case errors.Is(err, vector.ErrIndexScopeMismatch):
 			writeError(w, http.StatusBadRequest, "index_scope_mismatch", err.Error())
 		default:

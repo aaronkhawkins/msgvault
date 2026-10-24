@@ -53,7 +53,7 @@ func (b *Backend) FusedSearch(ctx context.Context, req vector.FusedRequest) ([]v
 	if err := vector.ValidateFilter(req.Filter); err != nil {
 		return nil, false, err
 	}
-	useFTS := len(req.FTSTerms) > 0
+	useFTS := req.HasFTS()
 	useANN := req.QueryVec != nil
 	if !useFTS && !useANN {
 		return nil, false, errors.New("FusedSearch: neither vector nor FTS query provided")
@@ -143,7 +143,7 @@ func (b *Backend) FusedSearch(ctx context.Context, req vector.FusedRequest) ([]v
 			// pre-formatted argument (operators &, prefix :*) and ERRORS on
 			// raw text — this is safe ONLY because we always feed it
 			// PostgreSQLQueryDialect.BuildFTSTerm's output, never raw text.
-			_, tsArg := query.PostgreSQLQueryDialect{}.BuildFTSTerm(req.FTSTerms)
+			_, tsArg := query.PostgreSQLFTSMatchArg(req.FTSClauses, req.FTSTerms)
 			ftsArg := bind(tsArg)
 			ftsRank := postgresFTSRankExpression("m.search_fts", ftsArg)
 			kp1Arg := bind(kPlus1)

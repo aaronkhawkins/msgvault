@@ -336,13 +336,50 @@ func (d *PostgreSQLDialect) JSONIsDistinctExpr(col string) string {
 // survive, returns "" so the caller can substitute a FALSE predicate
 // rather than feed to_tsquery an empty argument.
 func (d *PostgreSQLDialect) BuildFTSArg(terms []string) string {
-	out := make([]string, 0, len(terms))
-	for _, t := range terms {
-		for _, lex := range sqldialect.EscapeTSQueryTerm(t) {
-			out = append(out, lex+":*")
+	clauses := make([][]string, len(terms))
+	for i, term := range terms {
+		clauses[i] = []string{term}
+	}
+	return d.BuildFTSArgClauses(clauses)
+}
+
+// BuildFTSArgClauses formats AND-of-OR text groups as a to_tsquery
+// argument. Lexemes inside one user term stay AND'd, terms inside a
+// group are OR'd, and groups are AND'd. A flat term list matches
+// BuildFTSArg's historical output, including punctuation splitting.
+func (d *PostgreSQLDialect) BuildFTSArgClauses(clauses [][]string) string {
+	groups := make([]string, 0, len(clauses))
+	for _, clause := range clauses {
+		alternatives := make([]string, 0, len(clause))
+		for _, term := range clause {
+			lexemes := sqldialect.EscapeTSQueryTerm(term)
+			if len(lexemes) == 0 {
+				continue
+			}
+			parts := make([]string, len(lexemes))
+			for i, lexeme := range lexemes {
+				parts[i] = lexeme + ":*"
+			}
+			alternatives = append(alternatives, strings.Join(parts, " & "))
+		}
+		switch len(alternatives) {
+		case 0:
+			continue
+		case 1:
+			groups = append(groups, alternatives[0])
+		default:
+			wrapped := make([]string, len(alternatives))
+			for i, alternative := range alternatives {
+				if strings.Contains(alternative, " & ") {
+					wrapped[i] = "(" + alternative + ")"
+				} else {
+					wrapped[i] = alternative
+				}
+			}
+			groups = append(groups, "("+strings.Join(wrapped, " | ")+")")
 		}
 	}
-	return strings.Join(out, " & ")
+	return strings.Join(groups, " & ")
 }
 
 // InsertOrIgnore rewrites INSERT OR IGNORE INTO to INSERT INTO and appends

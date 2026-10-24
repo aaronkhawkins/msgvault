@@ -1991,10 +1991,12 @@ func (e *SQLiteEngine) buildSearchQueryPartsWithVisibility(ctx context.Context, 
 	}
 
 	// Full-text search: use dialect FTS if available, fall back to LIKE.
-	if len(q.TextTerms) > 0 {
+	// TextMatchClauses preserves OR groups. Callers that only set
+	// TextTerms still get one AND group per word.
+	if clauses := q.TextMatchClauses(); len(clauses) > 0 {
 		if e.hasFTSTable(ctx) {
 			ftsJoin = e.dialect.FTSJoin()
-			expr, arg := e.dialect.BuildFTSTerm(q.TextTerms)
+			expr, arg := e.dialect.BuildFTSClauses(clauses)
 			conditions = append(conditions, expr)
 			if arg != "" {
 				args = append(args, arg)
@@ -2003,11 +2005,21 @@ func (e *SQLiteEngine) buildSearchQueryPartsWithVisibility(ctx context.Context, 
 			// Fall back to LIKE-based search on subject/snippet only.
 			// LOWER both sides so PostgreSQL's case-sensitive LIKE
 			// returns the same hits as SQLite's ASCII-folded LIKE.
-			for _, term := range q.TextTerms {
-				likeTerm := "%" + escapeSQLiteLike(term) + "%"
-				conditions = append(conditions,
-					"(LOWER(m.subject) LIKE LOWER(?) ESCAPE '\\' OR LOWER(m.snippet) LIKE LOWER(?) ESCAPE '\\')")
-				args = append(args, likeTerm, likeTerm)
+			// Terms inside a group are OR'd; groups are AND'd.
+			for _, clause := range clauses {
+				alternatives := make([]string, 0, len(clause))
+				var clauseArgs []any
+				for _, term := range clause {
+					likeTerm := "%" + escapeSQLiteLike(term) + "%"
+					alternatives = append(alternatives,
+						"(LOWER(m.subject) LIKE LOWER(?) ESCAPE '\\' OR LOWER(m.snippet) LIKE LOWER(?) ESCAPE '\\')")
+					clauseArgs = append(clauseArgs, likeTerm, likeTerm)
+				}
+				if len(alternatives) == 0 {
+					continue
+				}
+				conditions = append(conditions, "("+strings.Join(alternatives, " OR ")+")")
+				args = append(args, clauseArgs...)
 			}
 		}
 	}
@@ -2085,7 +2097,7 @@ func (e *SQLiteEngine) SearchMessageBodies(ctx context.Context, q *search.Query,
 	structured := *q
 	structured.TextTerms = nil
 	conditions, args, ftsJoin := e.buildSearchQueryParts(ctx, &structured)
-	expr, arg := e.dialect.BuildFTSBodyTerm(q.TextTerms)
+	expr, arg := e.dialect.BuildFTSBodyClauses(q.TextMatchClauses())
 	conditions = append(conditions, expr)
 	if arg != "" {
 		args = append(args, arg)
@@ -2347,6 +2359,12 @@ func MergeFilterIntoQuery(q *search.Query, filter MessageFilter) *search.Query {
 	// Deep copy slices to avoid mutating original (shallow copy + append can
 	// mutate if original slice has spare capacity)
 	merged.TextTerms = append([]string(nil), q.TextTerms...)
+	if q.TextClauses != nil {
+		merged.TextClauses = make([][]string, len(q.TextClauses))
+		for i, clause := range q.TextClauses {
+			merged.TextClauses[i] = append([]string(nil), clause...)
+		}
+	}
 	merged.FromAddrs = append([]string(nil), q.FromAddrs...)
 	merged.ToAddrs = append([]string(nil), q.ToAddrs...)
 	merged.CcAddrs = append([]string(nil), q.CcAddrs...)
